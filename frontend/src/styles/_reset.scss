@@ -1,0 +1,52 @@
+@use 'variables' as *;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: $font-family-base;
+  color: $color-text-main;
+  background-color: $color-bg;
+  min-height: 100vh;
+}
+
+a {
+  color: $color-primary;
+  text-decoration: none;
+  transition: color $transition-fast;
+
+  &:hover {
+    color: $color-primary-hover;
+    text-decoration: underline;
+  }
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+code {
+  font-family: $font-family-mono;
+  font-size: 0.875em;
+  background-color: #f1f5f9;
+  padding: 0.125rem 0.375rem;
+  border-radius: $radius-sm;
+  color: #0f172a;
+}
