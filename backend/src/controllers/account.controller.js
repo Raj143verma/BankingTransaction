@@ -3,7 +3,7 @@ const accountModel = require("../models/account.model");
 const userModel = require("../models/user.model");
 const accountApplicationModel = require("../models/accountApplication.model");
 
-async function createAccountController(req, res) {
+async function createAccountController(req, res, next) {
   try {
     const user = req.user;
 
@@ -18,13 +18,11 @@ async function createAccountController(req, res) {
       account,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || "Failed to create account",
-    });
+    next(err);
   }
 }
 
-async function getUserAccountsController(req, res) {
+async function getUserAccountsController(req, res, next) {
   try {
     const accounts = await accountModel
       .find({ user: req.user._id })
@@ -79,9 +77,7 @@ async function getUserAccountsController(req, res) {
       accounts: formattedAccounts,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || "Failed to fetch accounts",
-    });
+    next(err);
   }
 }
 
@@ -89,7 +85,7 @@ async function getUserAccountsController(req, res) {
  * GET /api/accounts/customer-accounts
  * Fetch all customer deposit accounts (System User only)
  */
-async function getCustomerAccountsController(req, res) {
+async function getCustomerAccountsController(req, res, next) {
   try {
     // 1. Find all users that are normal customers (systemUser !== true)
     const customerUsers = await userModel
@@ -154,18 +150,17 @@ async function getCustomerAccountsController(req, res) {
       accounts: formattedAccounts,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || "Failed to fetch customer accounts",
-    });
+    next(err);
   }
 }
 
-async function getAccountBalanceController(req, res) {
+async function getAccountBalanceController(req, res, next) {
   try {
     const { accountId } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(accountId)) {
       return res.status(400).json({
+        status: "error",
         message: "Invalid account ID",
       });
     }
@@ -179,6 +174,7 @@ async function getAccountBalanceController(req, res) {
 
     if (!account) {
       return res.status(404).json({
+        status: "error",
         message: "Account not found",
       });
     }
@@ -190,9 +186,7 @@ async function getAccountBalanceController(req, res) {
       balance: balance,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || "Failed to fetch account balance",
-    });
+    next(err);
   }
 }
 

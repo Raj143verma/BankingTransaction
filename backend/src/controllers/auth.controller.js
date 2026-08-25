@@ -12,31 +12,61 @@ function getCookieOptions() {
     }
 }
 
-/*
-* user register controller 
-* post /api/auth/register
+/**
+ * User Register Controller
+ * POST /api/auth/register
  */
-
- async function userRegisterController(req,res) {
+async function userRegisterController(req, res, next) {
     try {
-        const {email,name,password} = req.body
+        const { email, name, password } = req.body || {};
 
-        const isExits = await userModel.findOne({
-            email: email
-        })
-        if(isExits){
+        if (!email || !name || !password) {
+            return res.status(400).json({
+                status: "error",
+                message: "Email, name, and password are required"
+            });
+        }
+
+        const trimmedEmail = String(email).trim().toLowerCase();
+        const trimmedName = String(name).trim();
+
+        if (trimmedEmail.length > 150) {
+            return res.status(400).json({
+                status: "error",
+                message: "Email address cannot exceed 150 characters"
+            });
+        }
+
+        if (trimmedName.length < 2 || trimmedName.length > 100) {
+            return res.status(400).json({
+                status: "error",
+                message: "Name must be between 2 and 100 characters"
+            });
+        }
+
+        if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+            return res.status(400).json({
+                status: "error",
+                message: "Password must be between 8 and 128 characters"
+            });
+        }
+
+        const isExits = await userModel.findOne({ email: trimmedEmail });
+        if (isExits) {
             return res.status(422).json({
-                message: "User already exists with this email address, Please try with another email address",
-                status: "failed"
-            })
+                status: "failed",
+                message: "User already exists with this email address, Please try with another email address"
+            });
         }
 
         const user = await userModel.create({
-            email, name, password
-        })
+            email: trimmedEmail,
+            name: trimmedName,
+            password
+        });
 
-        const token = jwt.sign({id: user._id}, process.env.JWT_SECRET, { expiresIn: "3d"} )
-        res.cookie("token", token, getCookieOptions())
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" });
+        res.cookie("token", token, getCookieOptions());
         res.status(201).json({
             user: {
                 _id: user._id,
@@ -45,54 +75,71 @@ function getCookieOptions() {
                 systemUser: Boolean(user.systemUser)
             },
             token
-        })
+        });
+
         try {
-            await emailService.sendRegisterEmail(user.email, user.name)
-        } catch(emailErr) {
-            console.error("Failed to send welcome email:", emailErr.message)
+            await emailService.sendRegisterEmail(user.email, user.name);
+        } catch (emailErr) {
+            console.error("Failed to send welcome email:", emailErr.message);
         }
-    } catch(err) {
-        if(err.code === 11000) {
+    } catch (err) {
+        if (err.code === 11000) {
             return res.status(422).json({
-                message: "User already exists with this email address, Please try with another email address",
-                status: "failed"
-            })
+                status: "failed",
+                message: "User already exists with this email address, Please try with another email address"
+            });
         }
-        if(err.name === "ValidationError") {
+        if (err.name === "ValidationError") {
             return res.status(400).json({
+                status: "error",
                 message: err.message
-            })
+            });
         }
-        return res.status(500).json({
-            message: err.message || "Registration failed"
-        })
+        next(err);
     }
 }
 
-  /*
-  * - user Login Controller
-  * - post /api/auth/login
-   */
-  async function userloginController(req,res) {
+/**
+ * User Login Controller
+ * POST /api/auth/login
+ */
+async function userloginController(req, res, next) {
     try {
-        const {email,password} = req.body
+        const { email, password } = req.body || {};
 
-        const user = await userModel.findOne({email}).select("+password +systemUser")
-
-        if(!user) {
-            return res.status(401).json({
-                message: " Invalid email or password"
-            })
+        if (!email || !password) {
+            return res.status(400).json({
+                status: "error",
+                message: "Email and password are required"
+            });
         }
-        const isValidPassword = await user.comparePassword(password)
-        if(!isValidPassword){
+
+        const trimmedEmail = String(email).trim().toLowerCase();
+        if (trimmedEmail.length > 150 || typeof password !== 'string' || password.length > 128) {
             return res.status(401).json({
+                status: "error",
                 message: "Invalid email or password"
-            })
+            });
         }
 
-        const token = jwt.sign({id: user._id}, process.env.JWT_SECRET, { expiresIn: "3d"} )
-        res.cookie("token", token, getCookieOptions())
+        const user = await userModel.findOne({ email: trimmedEmail }).select("+password +systemUser");
+
+        if (!user) {
+            return res.status(401).json({
+                status: "error",
+                message: "Invalid email or password"
+            });
+        }
+        const isValidPassword = await user.comparePassword(password);
+        if (!isValidPassword) {
+            return res.status(401).json({
+                status: "error",
+                message: "Invalid email or password"
+            });
+        }
+
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" });
+        res.cookie("token", token, getCookieOptions());
         return res.status(200).json({
             user: {
                 _id: user._id,
@@ -101,63 +148,58 @@ function getCookieOptions() {
                 systemUser: Boolean(user.systemUser)
             },
             token
-        })
-    } catch(err) {
-        return res.status(500).json({
-            message: err.message || "Login failed"
-        })
+        });
+    } catch (err) {
+        next(err);
     }
 }
 
 /**
- * - user Logout Controller
- * - post /api/auth/logout
+ * User Logout Controller
+ * POST /api/auth/logout
  */
-
-async function userLogoutController(req,res) {
+async function userLogoutController(req, res, next) {
     try {
         let token = req.cookies?.token;
-        if(!token && req.headers.authorization?.startsWith("Bearer ")) {
+        if (!token && req.headers.authorization?.startsWith("Bearer ")) {
             token = req.headers.authorization.split(" ")[1];
         }
 
-        if(!token) {
+        if (!token) {
             return res.status(200).json({
                 message: "User is logged out successfully"
-            })
+            });
         }
         res.cookie("token", "", {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
             sameSite: "strict",
             expires: new Date(0)
-        })
+        });
 
         try {
             await tokenBlacklistModel.create({
                 token: token
-            })
-        } catch(err) {
-            if(err.code !== 11000) {
+            });
+        } catch (err) {
+            if (err.code !== 11000) {
                 throw err;
             }
         }
 
         return res.status(200).json({
             message: "User logged out successfully"
-        })
-    } catch(err) {
-        return res.status(500).json({
-            message: err.message || "Logout failed"
-        })
+        });
+    } catch (err) {
+        next(err);
     }
 }
 
 /**
- * - get current user profile Controller
- * - get /api/auth/me
+ * Get current user profile Controller
+ * GET /api/auth/me
  */
-async function userMeController(req,res) {
+async function userMeController(req, res, next) {
     try {
         const user = req.user;
 
@@ -168,11 +210,9 @@ async function userMeController(req,res) {
                 name: user.name,
                 systemUser: Boolean(user.systemUser)
             }
-        })
-    } catch(err) {
-        return res.status(500).json({
-            message: err.message || "Failed to fetch user profile"
-        })
+        });
+    } catch (err) {
+        next(err);
     }
 }
 

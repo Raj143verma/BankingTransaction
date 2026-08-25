@@ -23,7 +23,7 @@ const emailService = require("../services/email.service")
  * 10. send email notification to sender and receiver
  * */
 
-async function createTransaction(req,res) {
+async function createTransaction(req, res, next) {
     
 
     /**
@@ -242,7 +242,7 @@ async function createTransaction(req,res) {
 }
    
 
-async function createinitializeFundsTransaction(req,res) {
+async function createinitializeFundsTransaction(req, res, next) {
     const { toAccount, amount, idempotencyKey } = req.body;
     if(!toAccount || amount === undefined || amount === null || !idempotencyKey) {
         return res.status(400).json({
@@ -428,7 +428,7 @@ async function createinitializeFundsTransaction(req,res) {
  *  - type (ALL, CREDIT, DEBIT)
  *  - status (ALL, PENDING, COMPLETED, FAILED, REVERSED)
  */
-async function getTransactions(req, res) {
+async function getTransactions(req, res, next) {
     try {
         const userId = req.user._id;
 
@@ -707,9 +707,7 @@ async function getTransactions(req, res) {
             }
         });
     } catch (err) {
-        return res.status(500).json({
-            message: err.message || "Failed to fetch transactions"
-        });
+        next(err);
     }
 }
 
@@ -722,7 +720,7 @@ async function getTransactions(req, res) {
  *  - netMovement: totalCredits - totalDebits
  *  - totalTransactions: total relevant COMPLETED transactions count
  */
-async function getTransactionSummary(req, res) {
+async function getTransactionSummary(req, res, next) {
     try {
         const userId = req.user._id;
 
@@ -779,9 +777,7 @@ async function getTransactionSummary(req, res) {
             totalTransactions: completedTransactions.length
         });
     } catch (err) {
-        return res.status(500).json({
-            message: err.message || "Failed to calculate transaction summary"
-        });
+        next(err);
     }
 }
 

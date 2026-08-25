@@ -15,11 +15,12 @@ const VALID_ACCOUNT_TYPES = ['SAVINGS', 'CURRENT'];
  * POST /api/account-applications
  * Submit a new customer account opening application
  */
-async function createAccountApplicationController(req, res) {
+async function createAccountApplicationController(req, res, next) {
   try {
     const user = req.user;
     if (!user) {
       return res.status(401).json({
+        status: 'error',
         message: 'Unauthorized access, user not authenticated',
       });
     }
@@ -27,6 +28,7 @@ async function createAccountApplicationController(req, res) {
     // System users should not submit customer applications
     if (user.systemUser) {
       return res.status(403).json({
+        status: 'error',
         message: 'System users cannot submit customer account opening applications',
       });
     }
@@ -48,7 +50,7 @@ async function createAccountApplicationController(req, res) {
       initialDeposit,
       confirmAccuracy,
       agreeTerms,
-    } = req.body;
+    } = req.body || {};
 
     // 1. Validate required fields presence
     if (
@@ -67,21 +69,24 @@ async function createAccountApplicationController(req, res) {
       initialDeposit === null
     ) {
       return res.status(400).json({
+        status: 'error',
         message: 'All application fields are required',
       });
     }
 
     // 2. Validate Personal Info
     const trimmedFullName = String(fullName).trim();
-    if (trimmedFullName.length < 2) {
+    if (trimmedFullName.length < 2 || trimmedFullName.length > 100) {
       return res.status(400).json({
-        message: 'Full Name must be at least 2 characters long',
+        status: 'error',
+        message: 'Full Name must be between 2 and 100 characters',
       });
     }
 
     const parsedDob = new Date(dateOfBirth);
     if (isNaN(parsedDob.getTime())) {
       return res.status(400).json({
+        status: 'error',
         message: 'Please provide a valid date of birth',
       });
     }
@@ -89,6 +94,7 @@ async function createAccountApplicationController(req, res) {
     const today = new Date();
     if (parsedDob >= today) {
       return res.status(400).json({
+        status: 'error',
         message: 'Date of birth must be in the past',
       });
     }
@@ -97,6 +103,7 @@ async function createAccountApplicationController(req, res) {
     const minAgeDate = new Date(today.getFullYear() - 18, today.getMonth(), today.getDate());
     if (parsedDob > minAgeDate) {
       return res.status(400).json({
+        status: 'error',
         message: 'Applicant must be at least 18 years old to open an account',
       });
     }
@@ -104,6 +111,7 @@ async function createAccountApplicationController(req, res) {
     const normalizedGender = String(gender).trim().toUpperCase();
     if (!VALID_GENDERS.includes(normalizedGender)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Gender must be MALE, FEMALE, or OTHER',
       });
     }
@@ -112,14 +120,16 @@ async function createAccountApplicationController(req, res) {
     const trimmedMobile = String(mobileNumber).trim();
     if (!MOBILE_REGEX.test(trimmedMobile) && !/^\d{10}$/.test(trimmedMobile)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Please enter a valid 10-digit mobile number',
       });
     }
 
     const trimmedEmail = String(email).trim().toLowerCase();
-    if (!EMAIL_REGEX.test(trimmedEmail)) {
+    if (!EMAIL_REGEX.test(trimmedEmail) || trimmedEmail.length > 150) {
       return res.status(400).json({
-        message: 'Please enter a valid email address',
+        status: 'error',
+        message: 'Please enter a valid email address (maximum 150 characters)',
       });
     }
 
@@ -130,12 +140,21 @@ async function createAccountApplicationController(req, res) {
 
     if (!trimmedAddress || !trimmedCity || !trimmedState) {
       return res.status(400).json({
+        status: 'error',
         message: 'Address, City, and State are required',
+      });
+    }
+
+    if (trimmedAddress.length > 250 || trimmedCity.length > 100 || trimmedState.length > 100) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Address fields exceed allowed character limits',
       });
     }
 
     if (!PIN_REGEX.test(trimmedPinCode)) {
       return res.status(400).json({
+        status: 'error',
         message: 'PIN Code must be a valid 6-digit number',
       });
     }
@@ -144,6 +163,7 @@ async function createAccountApplicationController(req, res) {
     const normalizedIdType = String(idType).trim().toUpperCase();
     if (!VALID_ID_TYPES.includes(normalizedIdType)) {
       return res.status(400).json({
+        status: 'error',
         message: 'ID Type must be Aadhaar, PAN, Passport, or Voter ID',
       });
     }
@@ -151,6 +171,7 @@ async function createAccountApplicationController(req, res) {
     const trimmedIdNumber = String(idNumber).trim();
     if (trimmedIdNumber.length < 3 || trimmedIdNumber.length > 30) {
       return res.status(400).json({
+        status: 'error',
         message: 'Please provide a valid ID number (3 to 30 characters)',
       });
     }
@@ -159,6 +180,7 @@ async function createAccountApplicationController(req, res) {
     const normalizedAccountType = String(accountType).trim().toUpperCase();
     if (!VALID_ACCOUNT_TYPES.includes(normalizedAccountType)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Account Type must be SAVINGS or CURRENT',
       });
     }
@@ -166,6 +188,7 @@ async function createAccountApplicationController(req, res) {
     const depositNum = Number(initialDeposit);
     if (!Number.isFinite(depositNum) || depositNum <= 0) {
       return res.status(400).json({
+        status: 'error',
         message: 'Initial deposit amount must be a finite number greater than zero',
       });
     }
@@ -173,12 +196,14 @@ async function createAccountApplicationController(req, res) {
     // 6. Validate Declarations
     if (confirmAccuracy !== true && confirmAccuracy !== 'true') {
       return res.status(400).json({
+        status: 'error',
         message: 'You must confirm that the information provided is accurate',
       });
     }
 
     if (agreeTerms !== true && agreeTerms !== 'true') {
       return res.status(400).json({
+        status: 'error',
         message: "You must agree to the bank's terms and conditions",
       });
     }
@@ -191,6 +216,7 @@ async function createAccountApplicationController(req, res) {
 
     if (existingPending) {
       return res.status(400).json({
+        status: 'error',
         message: 'You already have a pending account opening application.',
         existingApplicationId: existingPending._id,
       });
@@ -221,9 +247,7 @@ async function createAccountApplicationController(req, res) {
       application,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to submit account opening application',
-    });
+    next(err);
   }
 }
 
@@ -231,11 +255,12 @@ async function createAccountApplicationController(req, res) {
  * GET /api/account-applications/my
  * Fetch all applications submitted by the authenticated customer
  */
-async function getMyAccountApplicationsController(req, res) {
+async function getMyAccountApplicationsController(req, res, next) {
   try {
     const user = req.user;
     if (!user) {
       return res.status(401).json({
+        status: 'error',
         message: 'Unauthorized access',
       });
     }
@@ -250,9 +275,7 @@ async function getMyAccountApplicationsController(req, res) {
       applications,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to fetch your account applications',
-    });
+    next(err);
   }
 }
 
@@ -260,12 +283,13 @@ async function getMyAccountApplicationsController(req, res) {
  * GET /api/account-applications/:id
  * Retrieve a specific account application by ID
  */
-async function getAccountApplicationByIdController(req, res) {
+async function getAccountApplicationByIdController(req, res, next) {
   try {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Invalid application ID',
       });
     }
@@ -277,6 +301,7 @@ async function getAccountApplicationByIdController(req, res) {
 
     if (!application) {
       return res.status(404).json({
+        status: 'error',
         message: 'Account application not found',
       });
     }
@@ -287,6 +312,7 @@ async function getAccountApplicationByIdController(req, res) {
       !req.user.systemUser
     ) {
       return res.status(403).json({
+        status: 'error',
         message: 'Unauthorized: You do not have permission to view this application',
       });
     }
@@ -295,9 +321,7 @@ async function getAccountApplicationByIdController(req, res) {
       application,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to fetch account application',
-    });
+    next(err);
   }
 }
 
@@ -305,7 +329,7 @@ async function getAccountApplicationByIdController(req, res) {
  * GET /api/account-applications/system
  * Fetch customer account applications for system users with optional status filter
  */
-async function getSystemAccountApplicationsController(req, res) {
+async function getSystemAccountApplicationsController(req, res, next) {
   try {
     const { status } = req.query;
 
@@ -329,9 +353,7 @@ async function getSystemAccountApplicationsController(req, res) {
       applications,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to fetch system account applications',
-    });
+    next(err);
   }
 }
 
@@ -339,12 +361,13 @@ async function getSystemAccountApplicationsController(req, res) {
  * GET /api/account-applications/system/:id
  * Fetch complete details of one application for system review
  */
-async function getSystemAccountApplicationByIdController(req, res) {
+async function getSystemAccountApplicationByIdController(req, res, next) {
   try {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Invalid application ID',
       });
     }
@@ -358,6 +381,7 @@ async function getSystemAccountApplicationByIdController(req, res) {
 
     if (!application) {
       return res.status(404).json({
+        status: 'error',
         message: 'Account application not found',
       });
     }
@@ -366,9 +390,7 @@ async function getSystemAccountApplicationByIdController(req, res) {
       application,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to fetch account application details',
-    });
+    next(err);
   }
 }
 
@@ -377,11 +399,12 @@ async function getSystemAccountApplicationByIdController(req, res) {
  * Atomically approve an application, create an ACTIVE deposit account,
  * and record initial deposit through the double-entry ledger architecture.
  */
-async function approveAccountApplicationController(req, res) {
+async function approveAccountApplicationController(req, res, next) {
   const { id } = req.params;
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({
+      status: 'error',
       message: 'Invalid application ID',
     });
   }
@@ -396,6 +419,7 @@ async function approveAccountApplicationController(req, res) {
     if (!application) {
       await session.abortTransaction();
       return res.status(404).json({
+        status: 'error',
         message: 'Account application not found',
       });
     }
@@ -403,6 +427,7 @@ async function approveAccountApplicationController(req, res) {
     if (application.status === 'APPROVED') {
       await session.abortTransaction();
       return res.status(400).json({
+        status: 'error',
         message: 'Application has already been approved',
         createdAccountId: application.createdAccount,
       });
@@ -411,6 +436,7 @@ async function approveAccountApplicationController(req, res) {
     if (application.status === 'REJECTED') {
       await session.abortTransaction();
       return res.status(400).json({
+        status: 'error',
         message: 'Cannot approve a rejected application',
       });
     }
@@ -418,6 +444,7 @@ async function approveAccountApplicationController(req, res) {
     if (application.status !== 'PENDING') {
       await session.abortTransaction();
       return res.status(400).json({
+        status: 'error',
         message: 'Only PENDING applications can be approved',
       });
     }
@@ -523,10 +550,7 @@ async function approveAccountApplicationController(req, res) {
         await session.abortTransaction();
       } catch (_) {}
     }
-
-    return res.status(500).json({
-      message: err.message || 'Failed to approve application',
-    });
+    next(err);
   } finally {
     if (session) {
       try {
@@ -540,20 +564,30 @@ async function approveAccountApplicationController(req, res) {
  * POST /api/account-applications/system/:id/reject
  * Reject a customer account opening application with a mandatory rejection reason
  */
-async function rejectAccountApplicationController(req, res) {
+async function rejectAccountApplicationController(req, res, next) {
   try {
     const { id } = req.params;
-    const { rejectionReason } = req.body;
+    const { rejectionReason } = req.body || {};
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
+        status: 'error',
         message: 'Invalid application ID',
       });
     }
 
     if (!rejectionReason || typeof rejectionReason !== 'string' || !rejectionReason.trim()) {
       return res.status(400).json({
+        status: 'error',
         message: 'A non-empty rejection reason is required',
+      });
+    }
+
+    const trimmedReason = rejectionReason.trim();
+    if (trimmedReason.length > 500) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Rejection reason cannot exceed 500 characters',
       });
     }
 
@@ -561,30 +595,34 @@ async function rejectAccountApplicationController(req, res) {
 
     if (!application) {
       return res.status(404).json({
+        status: 'error',
         message: 'Account application not found',
       });
     }
 
     if (application.status === 'APPROVED') {
       return res.status(400).json({
+        status: 'error',
         message: 'Cannot reject an already approved application',
       });
     }
 
     if (application.status === 'REJECTED') {
       return res.status(400).json({
+        status: 'error',
         message: 'Application has already been rejected',
       });
     }
 
     if (application.status !== 'PENDING') {
       return res.status(400).json({
+        status: 'error',
         message: 'Only PENDING applications can be rejected',
       });
     }
 
     application.status = 'REJECTED';
-    application.rejectionReason = rejectionReason.trim();
+    application.rejectionReason = trimmedReason;
     application.reviewedBy = req.user._id;
     application.reviewedAt = new Date();
     await application.save();
@@ -594,9 +632,7 @@ async function rejectAccountApplicationController(req, res) {
       application,
     });
   } catch (err) {
-    return res.status(500).json({
-      message: err.message || 'Failed to reject application',
-    });
+    next(err);
   }
 }
 

@@ -1,19 +1,20 @@
 const express = require("express")
 const authController = require("../controllers/auth.controller")
 const { authMiddleware } = require("../middleware/auth.middleware")
+const { authLimiter } = require("../middleware/rateLimiter.middleware")
 
 const router = express.Router()
 
-/*post/api/auth/register */
-router.post("/register",authController.userRegisterController)
+/* POST /api/auth/register (Rate limited: 10 req / 15 min) */
+router.post("/register", authLimiter, authController.userRegisterController)
 
-/*post/api/auth/login */
-router.post("/login", authController.userloginController)
+/* POST /api/auth/login (Rate limited: 10 req / 15 min) */
+router.post("/login", authLimiter, authController.userloginController)
 
-/*get/api/auth/me */
+/* GET /api/auth/me */
 router.get("/me", authMiddleware, authController.userMeController)
 
-/*post/api/auth/logout */
+/* POST /api/auth/logout */
 router.post("/logout", authController.userLogoutController)
 
 module.exports = router

@@ -1,37 +1,36 @@
-const {Router} = require("express")
+const { Router } = require("express")
 const authMiddleware = require("../middleware/auth.middleware")
 const transactionController = require("../controllers/transaction.controller")
-
-
+const { transactionLimiter, systemFundLimiter } = require("../middleware/rateLimiter.middleware")
 
 const transactionRouter = Router()
 
-
-/** * - Post /api/transactions/
- * - Create a new transaction
- * - Protected Route
+/**
+ * POST /api/transactions/
+ * Create a new P2P fund transfer (Rate limited: 30 req / 1 min)
+ * Protected Route
  */ 
-transactionRouter.post('/', authMiddleware.authMiddleware,  transactionController.createTransaction)
+transactionRouter.post('/', authMiddleware.authMiddleware, transactionLimiter, transactionController.createTransaction)
 
 /**
- * - Get /api/transactions/summary
- * - Retrieve transaction financial totals (credits, debits, net movement)
- * - Protected Route
+ * GET /api/transactions/summary
+ * Retrieve transaction financial totals (credits, debits, net movement)
+ * Protected Route
  */
 transactionRouter.get('/summary', authMiddleware.authMiddleware, transactionController.getTransactionSummary)
 
 /**
- * - Get /api/transactions
- * - Retrieve paginated and filtered transactions for authenticated user
- * - Protected Route
+ * GET /api/transactions
+ * Retrieve paginated and filtered transactions for authenticated user
+ * Protected Route
  */
 transactionRouter.get('/', authMiddleware.authMiddleware, transactionController.getTransactions)
 
 /**
- * -Post /api/transactions/system/initialize-funds
- * Create initial funds transaction from system user
+ * POST /api/transactions/system/initialize-funds
+ * Create initial funds allocation transaction from system user (Rate limited: 60 req / 1 min)
+ * Protected System User Route
  */
-
-transactionRouter.post('/system/initialize-funds',authMiddleware.authSystemUserMiddleware, transactionController.createinitializeFundsTransaction)
+transactionRouter.post('/system/initialize-funds', authMiddleware.authSystemUserMiddleware, systemFundLimiter, transactionController.createinitializeFundsTransaction)
 
 module.exports = transactionRouter
