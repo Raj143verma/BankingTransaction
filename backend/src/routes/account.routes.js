@@ -35,4 +35,11 @@ router.get("/", authMiddleware.authMiddleware, accountController.getUserAccounts
  */
 router.get("/balance/:accountId", authMiddleware.authMiddleware, accountController.getAccountBalanceController)
 
+/**
+ * - PATCH /api/accounts/:id/status
+ * - Update customer account lifecycle status (System User only)
+ * - Protected System User Route
+ */
+router.patch("/:id/status", authMiddleware.authSystemUserMiddleware, accountController.updateAccountStatusController)
+
 module.exports = router

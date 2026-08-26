@@ -176,6 +176,38 @@ export function Accounts() {
                   </span>
                 </div>
 
+                {account.status === 'SUSPENDED' && (
+                  <div
+                    style={{
+                      margin: '0.75rem 1rem 0',
+                      padding: '0.5rem 0.75rem',
+                      backgroundColor: '#fef2f2',
+                      border: '1px solid #fecaca',
+                      borderRadius: '4px',
+                      color: '#991b1b',
+                      fontSize: '0.75rem',
+                    }}
+                  >
+                    ⚠️ <strong>Account Suspended:</strong> Inflows and outflows are temporarily restricted. Please contact customer support.
+                  </div>
+                )}
+
+                {account.status === 'INACTIVE' && (
+                  <div
+                    style={{
+                      margin: '0.75rem 1rem 0',
+                      padding: '0.5rem 0.75rem',
+                      backgroundColor: '#fffbeb',
+                      border: '1px solid #fef3c7',
+                      borderRadius: '4px',
+                      color: '#92400e',
+                      fontSize: '0.75rem',
+                    }}
+                  >
+                    ℹ️ <strong>Account Inactive:</strong> This account has been deactivated. Transactions cannot be initiated.
+                  </div>
+                )}
+
                 <div className="account-card-body">
                   <div className="account-id-box">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

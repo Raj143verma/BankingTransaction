@@ -44,6 +44,12 @@ export function AppLayout() {
             {isSystemUser && (
               <>
                 <NavLink
+                  to="/system/accounts"
+                  className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+                >
+                  Accounts Admin
+                </NavLink>
+                <NavLink
                   to="/system/applications"
                   className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
                 >

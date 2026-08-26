@@ -389,8 +389,9 @@ export function Transactions() {
           <div className="empty-state-icon">🏦</div>
           <h3>No Active Accounts Available</h3>
           <p>
-            You need at least one active deposit account to transfer funds. Please open an account
-            first.
+            {accounts.length > 0
+              ? 'Your account(s) are currently suspended or inactive. Outgoing transfers cannot be initiated. Please contact customer support.'
+              : 'You need at least one active deposit account to transfer funds. Please open an account first.'}
           </p>
           <Link to="/accounts" className="btn btn-primary">
             Go to Accounts

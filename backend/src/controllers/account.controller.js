@@ -99,12 +99,15 @@ async function getCustomerAccountsController(req, res, next) {
       });
     }
 
-    // 2. Find all active deposit accounts belonging to customer users
+    const statusFilter = typeof req.query?.status === 'string' ? req.query.status.trim().toUpperCase() : 'ALL';
+    const accountQuery = { user: { $in: customerUserIds } };
+    if (['ACTIVE', 'SUSPENDED', 'INACTIVE'].includes(statusFilter)) {
+      accountQuery.status = statusFilter;
+    }
+
+    // 2. Find customer deposit accounts matching query
     const accounts = await accountModel
-      .find({
-        user: { $in: customerUserIds },
-        status: "ACTIVE",
-      })
+      .find(accountQuery)
       .populate("user", "name email")
       .sort({ createdAt: -1 })
       .lean();
@@ -134,7 +137,7 @@ async function getCustomerAccountsController(req, res, next) {
         accountHolderName: holderName,
         accountType: acc.accountType || "SAVINGS",
         currency: acc.currency || "INR",
-        status: acc.status,
+        status: acc.status || "ACTIVE",
         createdAt: acc.createdAt,
         user: acc.user
           ? {
@@ -148,6 +151,156 @@ async function getCustomerAccountsController(req, res, next) {
 
     return res.status(200).json({
       accounts: formattedAccounts,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PATCH /api/accounts/:id/status
+ * Update customer account lifecycle status (System User only)
+ */
+async function updateAccountStatusController(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { status: requestedStatus, reason } = req.body || {};
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Invalid account ID",
+      });
+    }
+
+    if (!requestedStatus || typeof requestedStatus !== "string") {
+      return res.status(400).json({
+        status: "error",
+        message: "Status must be ACTIVE, SUSPENDED, or INACTIVE",
+      });
+    }
+
+    const normalizedStatus = requestedStatus.trim().toUpperCase();
+    const VALID_STATUSES = ["ACTIVE", "SUSPENDED", "INACTIVE"];
+    if (!VALID_STATUSES.includes(normalizedStatus)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Status must be ACTIVE, SUSPENDED, or INACTIVE",
+      });
+    }
+
+    if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
+      return res.status(400).json({
+        status: "error",
+        message: "A reason of at least 5 characters is required for changing account status",
+      });
+    }
+
+    const trimmedReason = reason.trim();
+    if (trimmedReason.length > 500) {
+      return res.status(400).json({
+        status: "error",
+        message: "Reason cannot exceed 500 characters",
+      });
+    }
+
+    // 1. Locate target account and populate owner
+    const account = await accountModel.findById(id).populate("user", "name email systemUser");
+    if (!account) {
+      return res.status(404).json({
+        status: "error",
+        message: "Account not found",
+      });
+    }
+
+    // 2. Guard institutional system reserve accounts
+    if (
+      account.user?.systemUser === true ||
+      account.accountHolderName === "System Reserve" ||
+      account.accountHolderName === "System Central Reserve"
+    ) {
+      return res.status(400).json({
+        status: "error",
+        message: "Institutional system accounts cannot have their status modified",
+      });
+    }
+
+    // 3. Transition validation
+    const currentStatus = account.status || "ACTIVE";
+    if (currentStatus === normalizedStatus) {
+      return res.status(400).json({
+        status: "error",
+        message: `Account is already in ${currentStatus} status`,
+      });
+    }
+
+    if (currentStatus === "INACTIVE" && normalizedStatus === "SUSPENDED") {
+      return res.status(400).json({
+        status: "error",
+        message: "Invalid status transition: Cannot transition account from INACTIVE to SUSPENDED",
+      });
+    }
+
+    // 4. Atomic status update with optimistic version lock
+    const updatedAccount = await accountModel
+      .findOneAndUpdate(
+        { _id: account._id, status: currentStatus },
+        {
+          $set: { status: normalizedStatus },
+          $inc: { __v: 1 },
+        },
+        { returnDocument: "after", runValidators: true }
+      )
+      .populate("user", "name email");
+
+    if (!updatedAccount) {
+      return res.status(409).json({
+        status: "error",
+        message: "Account status was modified by another concurrent request. Please reload and try again.",
+      });
+    }
+
+    // Resolve holder name
+    let holderName = updatedAccount.accountHolderName;
+    if (!holderName) {
+      const linkedApp = await accountApplicationModel
+        .findOne({ createdAccount: updatedAccount._id })
+        .select("fullName")
+        .lean();
+      holderName = linkedApp?.fullName || updatedAccount.user?.name || "Account Holder";
+    }
+
+    return res.status(200).json({
+      status: "success",
+      message: `Account status updated successfully from ${currentStatus} to ${normalizedStatus}`,
+      account: {
+        _id: updatedAccount._id,
+        accountHolderName: holderName,
+        accountType: updatedAccount.accountType || "SAVINGS",
+        status: updatedAccount.status,
+        currency: updatedAccount.currency || "INR",
+        createdAt: updatedAccount.createdAt,
+        updatedAt: updatedAccount.updatedAt,
+        user: updatedAccount.user
+          ? {
+              _id: updatedAccount.user._id,
+              name: updatedAccount.user.name,
+              email: updatedAccount.user.email,
+            }
+          : null,
+      },
+      audit: {
+        accountId: updatedAccount._id,
+        previousStatus: currentStatus,
+        newStatus: normalizedStatus,
+        reason: trimmedReason,
+        updatedBy: {
+          _id: req.user._id,
+          name: req.user.name,
+          email: req.user.email,
+        },
+        updatedAt: new Date(),
+      },
     });
   } catch (err) {
     next(err);
@@ -195,4 +348,5 @@ module.exports = {
   getUserAccountsController,
   getCustomerAccountsController,
   getAccountBalanceController,
+  updateAccountStatusController,
 };

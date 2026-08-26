@@ -13,6 +13,7 @@ import { AccountApplications } from './pages/AccountApplications';
 import { Transactions } from './pages/Transactions';
 import { SystemFunds } from './pages/SystemFunds';
 import { SystemApplications } from './pages/SystemApplications';
+import { SystemAccounts } from './pages/SystemAccounts';
 import { NotFound } from './pages/NotFound';
 
 export function App() {
@@ -37,6 +38,7 @@ export function App() {
           <Route path="/accounts/open" element={<AccountOpening />} />
           <Route path="/accounts/applications" element={<AccountApplications />} />
           <Route path="/transactions" element={<Transactions />} />
+          <Route path="/system/accounts" element={<SystemAccounts />} />
           <Route path="/system/funds" element={<SystemFunds />} />
           <Route path="/system/applications" element={<SystemApplications />} />
         </Route>

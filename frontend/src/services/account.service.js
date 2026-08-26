@@ -12,10 +12,14 @@ export const accountService = {
 
   /**
    * Fetch all customer deposit accounts (System User only)
-   * GET /api/accounts/customer-accounts
+   * GET /api/accounts/customer-accounts?status=...
    */
-  async getCustomerAccounts() {
-    const response = await api.get('/accounts/customer-accounts');
+  async getCustomerAccounts(status) {
+    const params = {};
+    if (status && status !== 'ALL') {
+      params.status = status;
+    }
+    const response = await api.get('/accounts/customer-accounts', { params });
     return response.data;
   },
 
@@ -25,6 +29,15 @@ export const accountService = {
    */
   async getAccountBalance(accountId) {
     const response = await api.get(`/accounts/balance/${accountId}`);
+    return response.data;
+  },
+
+  /**
+   * Update customer account lifecycle status (System User only)
+   * PATCH /api/accounts/:id/status
+   */
+  async updateAccountStatus(id, status, reason) {
+    const response = await api.patch(`/accounts/${id}/status`, { status, reason });
     return response.data;
   },
 
