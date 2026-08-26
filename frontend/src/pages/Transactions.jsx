@@ -815,6 +815,16 @@ export function Transactions() {
                           : (item.toAccountHolderName || 'Account Holder');
                         const relatedAccountId = isIncoming ? item.fromAccount : item.toAccount;
 
+                        const isReversed = item.status === 'REVERSED';
+                        const statusBadgeClass =
+                          item.status === 'COMPLETED'
+                            ? 'badge badge-success'
+                            : item.status === 'REVERSED'
+                            ? 'badge badge-danger'
+                            : item.status === 'PENDING'
+                            ? 'badge badge-warning'
+                            : 'badge badge-neutral';
+
                         return (
                           <div key={item._id} className="activity-item">
                             <div className="activity-item-top">
@@ -822,6 +832,10 @@ export function Transactions() {
                                 className={`activity-amount ${
                                   isIncoming ? 'credit' : 'debit'
                                 }`}
+                                style={{
+                                  textDecoration: isReversed ? 'line-through' : 'none',
+                                  opacity: isReversed ? 0.7 : 1,
+                                }}
                               >
                                 {isIncoming
                                   ? `+ ${formatCurrency(item.amount)}`
@@ -831,7 +845,7 @@ export function Transactions() {
                                 <span className={`transfer-tag ${isIncoming ? 'tag-credit' : 'tag-debit'}`}>
                                   INTERNAL TRANSFER
                                 </span>
-                                <span className="badge badge-success">{item.status || 'COMPLETED'}</span>
+                                <span className={statusBadgeClass}>{item.status || 'COMPLETED'}</span>
                               </div>
                             </div>
 
@@ -850,6 +864,23 @@ export function Transactions() {
                                 <span className="tx-id">ID: {item._id}</span>
                                 <span>{formatDate(item.createdAt)}</span>
                               </div>
+
+                              {isReversed && item.reversalReason && (
+                                <div
+                                  style={{
+                                    marginTop: '0.375rem',
+                                    padding: '0.375rem 0.5rem',
+                                    backgroundColor: '#fef2f2',
+                                    border: '1px solid #fecaca',
+                                    borderRadius: '4px',
+                                    fontSize: '0.75rem',
+                                    color: '#991b1b',
+                                  }}
+                                >
+                                  ↩️ <strong>Reversed:</strong> {item.reversalReason}
+                                  {item.reversedAt && ` (${formatDate(item.reversedAt)})`}
+                                </div>
+                              )}
                             </div>
                           </div>
                         );

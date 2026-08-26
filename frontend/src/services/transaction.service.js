@@ -28,6 +28,24 @@ export const transactionService = {
     const response = await api.post('/transactions', transferData);
     return response.data;
   },
+
+  /**
+   * Administratively reverse an eligible completed transaction (System User only)
+   * POST /api/transactions/:id/reverse
+   */
+  async reverseTransaction(id, reason) {
+    const response = await api.post(`/transactions/${id}/reverse`, { reason });
+    return response.data;
+  },
+
+  /**
+   * Get all transactions across the bank with filters and pagination (System User only)
+   * GET /api/transactions/system/all
+   */
+  async getSystemTransactions(params = {}) {
+    const response = await api.get('/transactions/system/all', { params });
+    return response.data;
+  },
 };
 
 export default transactionService;

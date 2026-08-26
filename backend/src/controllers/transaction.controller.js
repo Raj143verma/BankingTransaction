@@ -683,6 +683,9 @@ async function getTransactions(req, res, next) {
                 amount: tx.amount,
                 status: tx.status || 'COMPLETED',
                 idempotencyKey: tx.idempotencyKey,
+                reversalReason: tx.reversalReason || null,
+                reversedAt: tx.reversedAt || null,
+                reversedBy: tx.reversedBy || null,
                 createdAt: tx.createdAt,
                 updatedAt: tx.updatedAt
             };
@@ -781,9 +784,479 @@ async function getTransactionSummary(req, res, next) {
     }
 }
 
+/**
+ * POST /api/transactions/:id/reverse
+ * Administratively reverse an eligible completed transaction by inserting compensating double-entry ledger entries.
+ * (System User only)
+ */
+async function reverseTransactionController(req, res, next) {
+    try {
+        const { id } = req.params;
+        const { reason } = req.body || {};
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                status: "error",
+                message: "Invalid transaction ID"
+            });
+        }
+
+        if (!reason || typeof reason !== "string" || reason.trim().length < 5) {
+            return res.status(400).json({
+                status: "error",
+                message: "A reason of at least 5 characters is required for reversing a transaction"
+            });
+        }
+
+        const trimmedReason = reason.trim();
+        if (trimmedReason.length > 500) {
+            return res.status(400).json({
+                status: "error",
+                message: "Reason cannot exceed 500 characters"
+            });
+        }
+
+        const MAX_RETRIES = 3;
+        let reversalSuccess = false;
+        let reversedTransaction = null;
+        let fromAccHolderName = "Account Holder";
+        let toAccHolderName = "Account Holder";
+
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            let session;
+            try {
+                session = await mongoose.startSession();
+                session.startTransaction();
+
+                // 1. Atomic state lock on transaction (only transition if currently COMPLETED)
+                const lockedTx = await transactionModel.findOneAndUpdate(
+                    { _id: id, status: "COMPLETED" },
+                    {
+                        $set: {
+                            status: "REVERSED",
+                            reversalReason: trimmedReason,
+                            reversedAt: new Date(),
+                            reversedBy: req.user._id
+                        },
+                        $inc: { __v: 1 }
+                    },
+                    { session, returnDocument: "after" }
+                );
+
+                if (!lockedTx) {
+                    await session.abortTransaction();
+                    const existingTx = await transactionModel.findById(id);
+                    if (!existingTx) {
+                        return res.status(404).json({
+                            status: "error",
+                            message: "Transaction not found"
+                        });
+                    }
+                    if (existingTx.status === "REVERSED") {
+                        return res.status(400).json({
+                            status: "error",
+                            message: "Transaction has already been reversed"
+                        });
+                    }
+                    return res.status(400).json({
+                        status: "error",
+                        message: `Cannot reverse transaction with status ${existingTx.status}`
+                    });
+                }
+
+                // 2. Lock both involved accounts and verify receiver balance
+                const fromAccountDoc = await accountModel.findOneAndUpdate(
+                    { _id: lockedTx.fromAccount },
+                    { $inc: { __v: 1 } },
+                    { session, returnDocument: "after" }
+                );
+                const toAccountDoc = await accountModel.findOneAndUpdate(
+                    { _id: lockedTx.toAccount },
+                    { $inc: { __v: 1 } },
+                    { session, returnDocument: "after" }
+                );
+
+                if (!fromAccountDoc || !toAccountDoc) {
+                    await session.abortTransaction();
+                    return res.status(400).json({
+                        status: "error",
+                        message: "One or both accounts associated with this transaction could not be found"
+                    });
+                }
+
+                // 3. Balance safety rule: Destination account must have sufficient balance to cover the debit reversal
+                const receiverBalance = await toAccountDoc.getBalance(session);
+                if (receiverBalance < lockedTx.amount) {
+                    await session.abortTransaction();
+                    return res.status(400).json({
+                        status: "error",
+                        message: `Cannot reverse transaction: Destination account has insufficient available balance (${receiverBalance}) to debit the reversal amount (${lockedTx.amount})`
+                    });
+                }
+
+                // 4. Create compensating double-entry ledger entries
+                // Debit original receiver (toAccount)
+                await ladgerModel.create([
+                    {
+                        account: lockedTx.toAccount,
+                        amount: lockedTx.amount,
+                        transaction: lockedTx._id,
+                        type: "DEBIT"
+                    }
+                ], { session });
+
+                // Credit original sender (fromAccount)
+                await ladgerModel.create([
+                    {
+                        account: lockedTx.fromAccount,
+                        amount: lockedTx.amount,
+                        transaction: lockedTx._id,
+                        type: "CREDIT"
+                    }
+                ], { session });
+
+                await session.commitTransaction();
+                reversalSuccess = true;
+                reversedTransaction = lockedTx;
+                fromAccHolderName = fromAccountDoc.accountHolderName || "Account Holder";
+                toAccHolderName = toAccountDoc.accountHolderName || "Account Holder";
+                break;
+            } catch (err) {
+                if (session && session.inTransaction && session.inTransaction()) {
+                    try {
+                        await session.abortTransaction();
+                    } catch (abortErr) {}
+                }
+
+                const isTransient =
+                    (err.hasErrorLabel && err.hasErrorLabel("TransientTransactionError")) ||
+                    err.code === 112 ||
+                    err.message?.includes("WriteConflict");
+
+                if (isTransient && attempt < MAX_RETRIES - 1) {
+                    continue;
+                }
+
+                if (isTransient) {
+                    const checkTx = await transactionModel.findById(id);
+                    if (checkTx && checkTx.status === "REVERSED") {
+                        return res.status(400).json({
+                            status: "error",
+                            message: "Transaction has already been reversed"
+                        });
+                    }
+                    return res.status(409).json({
+                        status: "error",
+                        message: "Transaction is currently being processed by another concurrent request. Please try again."
+                    });
+                }
+
+                return next(err);
+            } finally {
+                if (session) {
+                    try {
+                        await session.endSession();
+                    } catch (endErr) {}
+                }
+            }
+        }
+
+        if (!reversalSuccess || !reversedTransaction) {
+            return res.status(500).json({
+                status: "error",
+                message: "Failed to reverse transaction due to a concurrent conflict. Please try again."
+            });
+        }
+
+        return res.status(200).json({
+            status: "success",
+            message: `Transaction ${reversedTransaction._id} successfully reversed`,
+            transaction: {
+                _id: reversedTransaction._id,
+                fromAccount: reversedTransaction.fromAccount,
+                toAccount: reversedTransaction.toAccount,
+                fromAccountHolderName: fromAccHolderName,
+                toAccountHolderName: toAccHolderName,
+                amount: reversedTransaction.amount,
+                status: reversedTransaction.status,
+                idempotencyKey: reversedTransaction.idempotencyKey,
+                reversalReason: reversedTransaction.reversalReason,
+                reversedAt: reversedTransaction.reversedAt,
+                reversedBy: reversedTransaction.reversedBy,
+                createdAt: reversedTransaction.createdAt,
+                updatedAt: reversedTransaction.updatedAt
+            },
+            audit: {
+                transactionId: reversedTransaction._id,
+                originalStatus: "COMPLETED",
+                newStatus: "REVERSED",
+                amount: reversedTransaction.amount,
+                fromAccount: reversedTransaction.fromAccount,
+                toAccount: reversedTransaction.toAccount,
+                reason: trimmedReason,
+                performedBy: {
+                    _id: req.user._id,
+                    name: req.user.name,
+                    email: req.user.email
+                },
+                timestamp: reversedTransaction.reversedAt
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * GET /api/transactions/system/all
+ * Retrieve paginated and filtered transactions across the entire system (System User only).
+ */
+async function getSystemTransactionsController(req, res, next) {
+    try {
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
+        const rawSearch = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+        const rawFromDate = typeof req.query.fromDate === 'string' ? req.query.fromDate.trim() : '';
+        const rawToDate = typeof req.query.toDate === 'string' ? req.query.toDate.trim() : '';
+        const rawStatus = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : 'ALL';
+
+        const queryConditions = [];
+
+        // 1. Status Filter
+        const validStatuses = ['PENDING', 'COMPLETED', 'FAILED', 'REVERSED'];
+        if (rawStatus !== 'ALL' && validStatuses.includes(rawStatus)) {
+            queryConditions.push({ status: rawStatus });
+        }
+
+        // 2. Date Range Filter
+        if (rawFromDate || rawToDate) {
+            const dateQuery = {};
+            if (rawFromDate) {
+                const startDate = new Date(rawFromDate);
+                if (!isNaN(startDate.getTime())) {
+                    startDate.setHours(0, 0, 0, 0);
+                    dateQuery.$gte = startDate;
+                }
+            }
+            if (rawToDate) {
+                const endDate = new Date(rawToDate);
+                if (!isNaN(endDate.getTime())) {
+                    endDate.setHours(23, 59, 59, 999);
+                    dateQuery.$lte = endDate;
+                }
+            }
+            if (Object.keys(dateQuery).length > 0) {
+                queryConditions.push({ createdAt: dateQuery });
+            }
+        }
+
+        // 3. Search Filter
+        if (rawSearch) {
+            const isObjectId = /^[0-9a-fA-F]{24}$/.test(rawSearch);
+            if (isObjectId) {
+                const searchObjId = new mongoose.Types.ObjectId(rawSearch);
+                queryConditions.push({
+                    $or: [
+                        { _id: searchObjId },
+                        { fromAccount: searchObjId },
+                        { toAccount: searchObjId }
+                    ]
+                });
+            } else {
+                const escaped = rawSearch.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+                const nameRegex = new RegExp(escaped, 'i');
+
+                const [matchingUsers, matchingApps] = await Promise.all([
+                    userModel.find({ name: nameRegex }).select('_id').lean(),
+                    accountApplicationModel.find({ fullName: nameRegex }).select('createdAccount').lean()
+                ]);
+
+                const matchingUserIds = matchingUsers.map(u => u._id);
+                const matchingAppAccountIds = matchingApps
+                    .filter(a => a.createdAccount)
+                    .map(a => a.createdAccount);
+
+                const matchingAccounts = await accountModel.find({
+                    $or: [
+                        { accountHolderName: nameRegex },
+                        { user: { $in: matchingUserIds } },
+                        { _id: { $in: matchingAppAccountIds } }
+                    ]
+                }).select('_id').lean();
+
+                const matchingAccountIds = matchingAccounts.map(a => a._id);
+
+                if (matchingAccountIds.length > 0) {
+                    queryConditions.push({
+                        $or: [
+                            { fromAccount: { $in: matchingAccountIds } },
+                            { toAccount: { $in: matchingAccountIds } }
+                        ]
+                    });
+                } else {
+                    return res.status(200).json({
+                        transactions: [],
+                        pagination: {
+                            page,
+                            limit,
+                            totalCount: 0,
+                            totalPages: 0,
+                            hasNextPage: false,
+                            hasPrevPage: false
+                        },
+                        filters: {
+                            search: rawSearch,
+                            fromDate: rawFromDate || null,
+                            toDate: rawToDate || null,
+                            status: rawStatus
+                        }
+                    });
+                }
+            }
+        }
+
+        const finalQuery = queryConditions.length === 0
+            ? {}
+            : queryConditions.length === 1
+            ? queryConditions[0]
+            : { $and: queryConditions };
+
+        const totalCount = await transactionModel.countDocuments(finalQuery);
+        const totalPages = Math.ceil(totalCount / limit) || 0;
+        const skip = (page - 1) * limit;
+
+        const transactions = await transactionModel
+            .find(finalQuery)
+            .populate('reversedBy', 'name email')
+            .sort({ createdAt: -1, _id: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean();
+
+        if (transactions.length === 0) {
+            return res.status(200).json({
+                transactions: [],
+                pagination: {
+                    page,
+                    limit,
+                    totalCount,
+                    totalPages,
+                    hasNextPage: false,
+                    hasPrevPage: page > 1
+                },
+                filters: {
+                    search: rawSearch,
+                    fromDate: rawFromDate || null,
+                    toDate: rawToDate || null,
+                    status: rawStatus
+                }
+            });
+        }
+
+        const pageAccountIds = new Set();
+        transactions.forEach(t => {
+            if (t.fromAccount) pageAccountIds.add(t.fromAccount.toString());
+            if (t.toAccount) pageAccountIds.add(t.toAccount.toString());
+        });
+
+        const accountsList = await accountModel
+            .find({ _id: { $in: Array.from(pageAccountIds) } })
+            .populate('user', 'name email')
+            .lean();
+
+        const legacyAccountIds = accountsList
+            .filter(acc => !acc.accountHolderName)
+            .map(acc => acc._id);
+
+        const linkedApps = legacyAccountIds.length > 0
+            ? await accountApplicationModel
+                .find({ createdAccount: { $in: legacyAccountIds } })
+                .select('createdAccount fullName')
+                .lean()
+            : [];
+
+        const appNameMap = new Map();
+        linkedApps.forEach(app => {
+            if (app.createdAccount && app.fullName) {
+                appNameMap.set(app.createdAccount.toString(), app.fullName);
+            }
+        });
+
+        const accountMap = new Map();
+        accountsList.forEach(acc => {
+            const accIdStr = acc._id.toString();
+            const holderName =
+                acc.accountHolderName ||
+                appNameMap.get(accIdStr) ||
+                acc.user?.name ||
+                'Account Holder';
+
+            accountMap.set(accIdStr, {
+                _id: accIdStr,
+                accountHolderName: holderName,
+                accountType: acc.accountType || 'SAVINGS',
+                currency: acc.currency || 'INR',
+                status: acc.status || 'ACTIVE'
+            });
+        });
+
+        const formattedTransactions = transactions.map(tx => {
+            const fromId = tx.fromAccount ? tx.fromAccount.toString() : '';
+            const toId = tx.toAccount ? tx.toAccount.toString() : '';
+
+            const fromInfo = accountMap.get(fromId);
+            const toInfo = accountMap.get(toId);
+
+            return {
+                _id: tx._id,
+                fromAccount: fromId,
+                toAccount: toId,
+                fromAccountHolderName: fromInfo?.accountHolderName || 'Account Holder',
+                toAccountHolderName: toInfo?.accountHolderName || 'Account Holder',
+                amount: tx.amount,
+                status: tx.status || 'COMPLETED',
+                idempotencyKey: tx.idempotencyKey,
+                reversalReason: tx.reversalReason || null,
+                reversedAt: tx.reversedAt || null,
+                reversedBy: tx.reversedBy
+                    ? {
+                        _id: tx.reversedBy._id,
+                        name: tx.reversedBy.name,
+                        email: tx.reversedBy.email
+                    }
+                    : null,
+                createdAt: tx.createdAt,
+                updatedAt: tx.updatedAt
+            };
+        });
+
+        return res.status(200).json({
+            transactions: formattedTransactions,
+            pagination: {
+                page,
+                limit,
+                totalCount,
+                totalPages,
+                hasNextPage: page < totalPages,
+                hasPrevPage: page > 1
+            },
+            filters: {
+                search: rawSearch,
+                fromDate: rawFromDate || null,
+                toDate: rawToDate || null,
+                status: rawStatus
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
 module.exports = {
     createTransaction,
     createinitializeFundsTransaction,
     getTransactions,
-    getTransactionSummary
-}
+    getTransactionSummary,
+    reverseTransactionController,
+    getSystemTransactionsController
+};

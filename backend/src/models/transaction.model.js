@@ -34,10 +34,23 @@ const transactionSchema = new mongoose.Schema({
         required: [true, "Idempotency key is required for creating a transaction"],
         index: true,
         unique: true
+    },
+    reversalReason: {
+        type: String,
+        trim: true,
+        default: null
+    },
+    reversedAt: {
+        type: Date,
+        default: null
+    },
+    reversedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null
     }
 },{
     timestamps: true
-
 });
 
 transactionSchema.index({ fromAccount: 1, createdAt: -1 });
