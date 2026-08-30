@@ -11,6 +11,7 @@ const authRouter = require('./routes/auth.routes');
 const accountRouter = require('./routes/account.routes');
 const transactionRouter = require('./routes/transaction.routes');
 const accountApplicationRouter = require('./routes/accountApplication.routes');
+const auditLogRouter = require('./routes/auditLog.routes');
 
 const app = express();
 
@@ -68,6 +69,7 @@ app.use('/api/auth', authRouter);
 app.use('/api/accounts', accountRouter);
 app.use('/api/transactions', transactionRouter);
 app.use('/api/account-applications', accountApplicationRouter);
+app.use('/api/audit-logs', auditLogRouter);
 
 // Phase G: 404 Handler for unmatched routes
 app.use(notFoundHandler);

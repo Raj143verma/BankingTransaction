@@ -67,6 +67,12 @@ export function AppLayout() {
                 >
                   Fund Management
                 </NavLink>
+                <NavLink
+                  to="/system/audit-logs"
+                  className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+                >
+                  Audit Trail
+                </NavLink>
               </>
             )}
           </nav>

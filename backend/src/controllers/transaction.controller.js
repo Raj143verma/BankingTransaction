@@ -5,6 +5,7 @@ const accountApplicationModel = require("../models/accountApplication.model")
 const userModel = require("../models/user.model")
 const mongoose = require("mongoose")
 const emailService = require("../services/email.service")
+const { logAuditEvent } = require("../services/auditLog.service")
 
 
 
@@ -354,6 +355,27 @@ async function createinitializeFundsTransaction(req, res, next) {
 
         transaction.status = "COMPLETED";
         await transaction.save({ session });
+
+        await logAuditEvent({
+            actor: req.user._id,
+            action: "SYSTEM_FUNDS_INITIALIZED",
+            resourceType: "TRANSACTION",
+            resourceId: transaction._id,
+            previousState: null,
+            newState: {
+                status: "COMPLETED",
+                amount: amount,
+                fromAccount: fromUserAccount._id,
+                toAccount: toAccount
+            },
+            metadata: {
+                idempotencyKey,
+                amount,
+                fromAccount: fromUserAccount._id,
+                toAccount: toAccount
+            },
+            req
+        }, session);
 
         await session.commitTransaction();
     } catch (err) {
@@ -914,6 +936,24 @@ async function reverseTransactionController(req, res, next) {
                         type: "CREDIT"
                     }
                 ], { session });
+
+                await logAuditEvent({
+                    actor: req.user._id,
+                    action: "TRANSACTION_REVERSED",
+                    resourceType: "TRANSACTION",
+                    resourceId: lockedTx._id,
+                    previousState: { status: "COMPLETED" },
+                    newState: { status: "REVERSED" },
+                    reason: trimmedReason,
+                    metadata: {
+                        amount: lockedTx.amount,
+                        fromAccount: lockedTx.fromAccount,
+                        toAccount: lockedTx.toAccount,
+                        fromAccountHolderName: fromAccountDoc.accountHolderName || "Account Holder",
+                        toAccountHolderName: toAccountDoc.accountHolderName || "Account Holder"
+                    },
+                    req
+                }, session);
 
                 await session.commitTransaction();
                 reversalSuccess = true;

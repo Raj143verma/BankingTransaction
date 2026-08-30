@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const accountModel = require("../models/account.model");
 const userModel = require("../models/user.model");
 const accountApplicationModel = require("../models/accountApplication.model");
+const { logAuditEvent } = require("../services/auditLog.service");
 
 async function createAccountController(req, res, next) {
   try {
@@ -269,6 +270,26 @@ async function updateAccountStatusController(req, res, next) {
         .lean();
       holderName = linkedApp?.fullName || updatedAccount.user?.name || "Account Holder";
     }
+
+    let actionType = "ACCOUNT_SUSPENDED";
+    if (normalizedStatus === "ACTIVE") actionType = "ACCOUNT_REACTIVATED";
+    else if (normalizedStatus === "INACTIVE") actionType = "ACCOUNT_DEACTIVATED";
+
+    await logAuditEvent({
+      actor: req.user._id,
+      action: actionType,
+      resourceType: "ACCOUNT",
+      resourceId: updatedAccount._id,
+      previousState: { status: currentStatus },
+      newState: { status: normalizedStatus },
+      reason: trimmedReason,
+      metadata: {
+        accountHolderName: holderName,
+        accountType: updatedAccount.accountType || "SAVINGS",
+        currency: updatedAccount.currency || "INR",
+      },
+      req,
+    });
 
     return res.status(200).json({
       status: "success",

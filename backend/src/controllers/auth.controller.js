@@ -2,6 +2,7 @@ const userModel = require("../models/user.model")
 const jwt = require("jsonwebtoken")
 const emailService = require("../services/email.service")
 const tokenBlacklistModel = require("../models/blackList.model")
+const { logAuditEvent } = require("../services/auditLog.service")
 
 function getCookieOptions() {
     return {
@@ -140,6 +141,27 @@ async function userloginController(req, res, next) {
 
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" });
         res.cookie("token", token, getCookieOptions());
+
+        if (user.systemUser) {
+            try {
+                await logAuditEvent({
+                    actor: user._id,
+                    action: "SYSTEM_LOGIN",
+                    resourceType: "USER",
+                    resourceId: user._id,
+                    previousState: null,
+                    newState: { loginTime: new Date() },
+                    metadata: {
+                        name: user.name,
+                        email: user.email
+                    },
+                    req
+                });
+            } catch (auditErr) {
+                console.error("Failed to log SYSTEM_LOGIN event:", auditErr.message);
+            }
+        }
+
         return res.status(200).json({
             user: {
                 _id: user._id,
@@ -185,6 +207,28 @@ async function userLogoutController(req, res, next) {
             if (err.code !== 11000) {
                 throw err;
             }
+        }
+
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            const loggingOutUser = await userModel.findById(decoded.id).select("+systemUser");
+            if (loggingOutUser && loggingOutUser.systemUser) {
+                await logAuditEvent({
+                    actor: loggingOutUser._id,
+                    action: "SYSTEM_LOGOUT",
+                    resourceType: "USER",
+                    resourceId: loggingOutUser._id,
+                    previousState: null,
+                    newState: { logoutTime: new Date() },
+                    metadata: {
+                        name: loggingOutUser.name,
+                        email: loggingOutUser.email
+                    },
+                    req
+                });
+            }
+        } catch (auditErr) {
+            // Ignore audit/token verification errors on logout
         }
 
         return res.status(200).json({

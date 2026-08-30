@@ -3,6 +3,7 @@ const accountApplicationModel = require('../models/accountApplication.model');
 const accountModel = require('../models/account.model');
 const transactionModel = require('../models/transaction.model');
 const ladgerModel = require('../models/ladger.model');
+const { logAuditEvent } = require('../services/auditLog.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MOBILE_REGEX = /^[6-9]\d{9}$/;
@@ -537,6 +538,26 @@ async function approveAccountApplicationController(req, res, next) {
     application.reviewedAt = new Date();
     await application.save({ session });
 
+    // 5. Record immutable audit log event within active session
+    await logAuditEvent(
+      {
+        actor: req.user._id,
+        action: 'APPLICATION_APPROVED',
+        resourceType: 'ACCOUNT_APPLICATION',
+        resourceId: application._id,
+        previousState: { status: 'PENDING' },
+        newState: { status: 'APPROVED', createdAccountId: newAccount._id },
+        metadata: {
+          fullName: application.fullName,
+          accountType: application.accountType || 'SAVINGS',
+          initialDeposit: application.initialDeposit || 0,
+          createdAccountId: newAccount._id,
+        },
+        req,
+      },
+      session
+    );
+
     await session.commitTransaction();
 
     return res.status(200).json({
@@ -626,6 +647,21 @@ async function rejectAccountApplicationController(req, res, next) {
     application.reviewedBy = req.user._id;
     application.reviewedAt = new Date();
     await application.save();
+
+    await logAuditEvent({
+      actor: req.user._id,
+      action: 'APPLICATION_REJECTED',
+      resourceType: 'ACCOUNT_APPLICATION',
+      resourceId: application._id,
+      previousState: { status: 'PENDING' },
+      newState: { status: 'REJECTED' },
+      reason: trimmedReason,
+      metadata: {
+        fullName: application.fullName,
+        accountType: application.accountType || 'SAVINGS',
+      },
+      req,
+    });
 
     return res.status(200).json({
       message: 'Application rejected successfully',
