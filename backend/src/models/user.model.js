@@ -30,6 +30,26 @@ const userSchema = new mongoose.Schema({
         type: Boolean,
         default: false,
         immutable: true
+    },
+    failedLoginAttempts: {
+        type: Number,
+        default: 0
+    },
+    lockedUntil: {
+        type: Date,
+        default: null
+    },
+    lastLoginAt: {
+        type: Date,
+        default: null
+    },
+    passwordChangedAt: {
+        type: Date,
+        default: null
+    },
+    sessionVersion: {
+        type: Number,
+        default: 1
     }
 }, {
     timestamps: true

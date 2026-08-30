@@ -16,6 +16,7 @@ import { SystemApplications } from './pages/SystemApplications';
 import { SystemAccounts } from './pages/SystemAccounts';
 import { SystemTransactions } from './pages/SystemTransactions';
 import { SystemAuditLogs } from './pages/SystemAuditLogs';
+import { SecuritySettings } from './pages/SecuritySettings';
 import { NotFound } from './pages/NotFound';
 
 export function App() {
@@ -40,6 +41,8 @@ export function App() {
           <Route path="/accounts/open" element={<AccountOpening />} />
           <Route path="/accounts/applications" element={<AccountApplications />} />
           <Route path="/transactions" element={<Transactions />} />
+          <Route path="/security" element={<SecuritySettings />} />
+          <Route path="/system/security" element={<SecuritySettings />} />
           <Route path="/system/accounts" element={<SystemAccounts />} />
           <Route path="/system/transactions" element={<SystemTransactions />} />
           <Route path="/system/audit-logs" element={<SystemAuditLogs />} />

@@ -5,7 +5,7 @@ const auditLogSchema = new mongoose.Schema(
     actor: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: [true, 'Actor ID is required for audit logs'],
+      default: null,
       index: true,
     },
     action: {
@@ -14,6 +14,10 @@ const auditLogSchema = new mongoose.Schema(
       enum: [
         'SYSTEM_LOGIN',
         'SYSTEM_LOGOUT',
+        'LOGIN_FAILED',
+        'SYSTEM_ACCOUNT_LOCKED',
+        'PASSWORD_CHANGED',
+        'SESSIONS_REVOKED',
         'APPLICATION_APPROVED',
         'APPLICATION_REJECTED',
         'ACCOUNT_SUSPENDED',

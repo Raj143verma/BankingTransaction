@@ -1,8 +1,11 @@
-const userModel = require("../models/user.model")
-const jwt = require("jsonwebtoken")
-const emailService = require("../services/email.service")
-const tokenBlacklistModel = require("../models/blackList.model")
-const { logAuditEvent } = require("../services/auditLog.service")
+const userModel = require("../models/user.model");
+const jwt = require("jsonwebtoken");
+const emailService = require("../services/email.service");
+const tokenBlacklistModel = require("../models/blackList.model");
+const { logAuditEvent } = require("../services/auditLog.service");
+
+const SYSTEM_LOGIN_MAX_ATTEMPTS = parseInt(process.env.SYSTEM_LOGIN_MAX_ATTEMPTS || "5", 10);
+const SYSTEM_LOGIN_LOCKOUT_MINUTES = parseInt(process.env.SYSTEM_LOGIN_LOCKOUT_MINUTES || "15", 10);
 
 function getCookieOptions() {
     return {
@@ -10,7 +13,35 @@ function getCookieOptions() {
         secure: process.env.NODE_ENV === "production",
         sameSite: "strict",
         maxAge: 3 * 24 * 60 * 60 * 1000 // 3 days
+    };
+}
+
+/**
+ * Server-side password policy validation helper
+ */
+function validatePasswordPolicy(password) {
+    if (typeof password !== "string") {
+        return { valid: false, message: "Password must be a string" };
     }
+    if (password.trim().length === 0) {
+        return { valid: false, message: "Password cannot be empty or whitespace only" };
+    }
+    if (password.length < 8 || password.length > 128) {
+        return { valid: false, message: "Password must be between 8 and 128 characters" };
+    }
+    // Must contain at least one uppercase, one lowercase, and at least one digit or special character
+    const hasUpper = /[A-Z]/.test(password);
+    const hasLower = /[a-z]/.test(password);
+    const hasDigitOrSpecial = /[\d!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+    if (!hasUpper || !hasLower || !hasDigitOrSpecial) {
+        return {
+            valid: false,
+            message: "Password must contain at least one uppercase letter, one lowercase letter, and one number or special character"
+        };
+    }
+
+    return { valid: true };
 }
 
 /**
@@ -45,10 +76,11 @@ async function userRegisterController(req, res, next) {
             });
         }
 
-        if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+        const policyCheck = validatePasswordPolicy(password);
+        if (!policyCheck.valid) {
             return res.status(400).json({
                 status: "error",
-                message: "Password must be between 8 and 128 characters"
+                message: policyCheck.message
             });
         }
 
@@ -63,17 +95,23 @@ async function userRegisterController(req, res, next) {
         const user = await userModel.create({
             email: trimmedEmail,
             name: trimmedName,
-            password
+            password,
+            sessionVersion: 1
         });
 
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" });
+        const token = jwt.sign(
+            { id: user._id, sessionVersion: user.sessionVersion || 1 },
+            process.env.JWT_SECRET,
+            { expiresIn: "3d" }
+        );
         res.cookie("token", token, getCookieOptions());
         res.status(201).json({
             user: {
                 _id: user._id,
                 email: user.email,
                 name: user.name,
-                systemUser: Boolean(user.systemUser)
+                systemUser: Boolean(user.systemUser),
+                sessionVersion: user.sessionVersion || 1
             },
             token
         });
@@ -116,30 +154,124 @@ async function userloginController(req, res, next) {
         }
 
         const trimmedEmail = String(email).trim().toLowerCase();
-        if (trimmedEmail.length > 150 || typeof password !== 'string' || password.length > 128) {
+        if (trimmedEmail.length > 150 || typeof password !== "string" || password.length > 128) {
             return res.status(401).json({
                 status: "error",
                 message: "Invalid email or password"
             });
         }
 
-        const user = await userModel.findOne({ email: trimmedEmail }).select("+password +systemUser");
+        const user = await userModel.findOne({ email: trimmedEmail }).select("+password +systemUser +failedLoginAttempts +lockedUntil +sessionVersion +lastLoginAt +passwordChangedAt");
 
         if (!user) {
-            return res.status(401).json({
-                status: "error",
-                message: "Invalid email or password"
-            });
-        }
-        const isValidPassword = await user.comparePassword(password);
-        if (!isValidPassword) {
+            try {
+                await logAuditEvent({
+                    actor: null,
+                    action: "LOGIN_FAILED",
+                    resourceType: "USER",
+                    reason: "User not found with provided email",
+                    metadata: {
+                        email: trimmedEmail
+                    },
+                    req
+                });
+            } catch (auditErr) {
+                // Ignore audit error during login
+            }
             return res.status(401).json({
                 status: "error",
                 message: "Invalid email or password"
             });
         }
 
-        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" });
+        // Account Lockout check
+        if (user.lockedUntil) {
+            if (new Date(user.lockedUntil) > new Date()) {
+                try {
+                    await logAuditEvent({
+                        actor: user._id,
+                        action: "LOGIN_FAILED",
+                        resourceType: "USER",
+                        resourceId: user._id,
+                        reason: "Account is currently locked",
+                        metadata: {
+                            email: user.email,
+                            lockedUntil: user.lockedUntil
+                        },
+                        req
+                    });
+                } catch (auditErr) {}
+
+                return res.status(423).json({
+                    status: "error",
+                    message: "Account is temporarily locked due to consecutive failed login attempts. Please try again later.",
+                    lockedUntil: user.lockedUntil
+                });
+            } else {
+                // Lockout duration expired: reset counter and clear lock
+                user.lockedUntil = null;
+                user.failedLoginAttempts = 0;
+            }
+        }
+
+        const isValidPassword = await user.comparePassword(password);
+        if (!isValidPassword) {
+            user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+            let isLockedNow = false;
+
+            if (user.systemUser && user.failedLoginAttempts >= SYSTEM_LOGIN_MAX_ATTEMPTS) {
+                user.lockedUntil = new Date(Date.now() + SYSTEM_LOGIN_LOCKOUT_MINUTES * 60 * 1000);
+                isLockedNow = true;
+            }
+
+            await user.save();
+
+            try {
+                await logAuditEvent({
+                    actor: user._id,
+                    action: isLockedNow ? "SYSTEM_ACCOUNT_LOCKED" : "LOGIN_FAILED",
+                    resourceType: "USER",
+                    resourceId: user._id,
+                    reason: isLockedNow
+                        ? `Exceeded max failed login attempts (${SYSTEM_LOGIN_MAX_ATTEMPTS})`
+                        : "Invalid password attempt",
+                    metadata: {
+                        email: user.email,
+                        failedAttempts: user.failedLoginAttempts,
+                        lockedUntil: user.lockedUntil
+                    },
+                    req
+                });
+            } catch (auditErr) {
+                console.error("Failed to log audit event on failed login:", auditErr.message);
+            }
+
+            if (isLockedNow) {
+                return res.status(423).json({
+                    status: "error",
+                    message: "Account is temporarily locked due to consecutive failed login attempts. Please try again later.",
+                    lockedUntil: user.lockedUntil
+                });
+            }
+
+            return res.status(401).json({
+                status: "error",
+                message: "Invalid email or password"
+            });
+        }
+
+        // Successful authentication: Reset failed attempts, update lastLoginAt
+        user.failedLoginAttempts = 0;
+        user.lockedUntil = null;
+        user.lastLoginAt = new Date();
+        await user.save();
+
+        const sessionVersion = user.sessionVersion || 1;
+        const token = jwt.sign(
+            { id: user._id, sessionVersion },
+            process.env.JWT_SECRET,
+            { expiresIn: "3d" }
+        );
         res.cookie("token", token, getCookieOptions());
 
         if (user.systemUser) {
@@ -150,7 +282,7 @@ async function userloginController(req, res, next) {
                     resourceType: "USER",
                     resourceId: user._id,
                     previousState: null,
-                    newState: { loginTime: new Date() },
+                    newState: { loginTime: user.lastLoginAt, sessionVersion },
                     metadata: {
                         name: user.name,
                         email: user.email
@@ -167,7 +299,10 @@ async function userloginController(req, res, next) {
                 _id: user._id,
                 email: user.email,
                 name: user.name,
-                systemUser: Boolean(user.systemUser)
+                systemUser: Boolean(user.systemUser),
+                sessionVersion,
+                lastLoginAt: user.lastLoginAt,
+                passwordChangedAt: user.passwordChangedAt
             },
             token
         });
@@ -252,6 +387,189 @@ async function userMeController(req, res, next) {
                 _id: user._id,
                 email: user.email,
                 name: user.name,
+                systemUser: Boolean(user.systemUser),
+                sessionVersion: user.sessionVersion || 1,
+                lastLoginAt: user.lastLoginAt,
+                passwordChangedAt: user.passwordChangedAt
+            }
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * Change Password Controller
+ * POST /api/auth/change-password
+ */
+async function changePasswordController(req, res, next) {
+    try {
+        const { currentPassword, newPassword, confirmPassword } = req.body || {};
+
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({
+                status: "error",
+                message: "Current password and new password are required"
+            });
+        }
+
+        if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+            return res.status(400).json({
+                status: "error",
+                message: "New password and confirm password do not match"
+            });
+        }
+
+        if (currentPassword === newPassword) {
+            return res.status(400).json({
+                status: "error",
+                message: "New password cannot be identical to the current password"
+            });
+        }
+
+        const policyCheck = validatePasswordPolicy(newPassword);
+        if (!policyCheck.valid) {
+            return res.status(400).json({
+                status: "error",
+                message: policyCheck.message
+            });
+        }
+
+        const user = await userModel.findById(req.user._id).select("+password +systemUser +sessionVersion");
+        if (!user) {
+            return res.status(404).json({
+                status: "error",
+                message: "User not found"
+            });
+        }
+
+        const isCurrentValid = await user.comparePassword(currentPassword);
+        if (!isCurrentValid) {
+            return res.status(400).json({
+                status: "error",
+                message: "Current password is incorrect"
+            });
+        }
+
+        // Apply password change, update timestamp, and increment session version to invalidate old tokens
+        user.password = newPassword;
+        user.passwordChangedAt = new Date();
+        user.sessionVersion = (user.sessionVersion || 1) + 1;
+        user.failedLoginAttempts = 0;
+        user.lockedUntil = null;
+        await user.save();
+
+        // Sign new JWT token for the current session with updated session version
+        const token = jwt.sign(
+            { id: user._id, sessionVersion: user.sessionVersion },
+            process.env.JWT_SECRET,
+            { expiresIn: "3d" }
+        );
+        res.cookie("token", token, getCookieOptions());
+
+        try {
+            await logAuditEvent({
+                actor: user._id,
+                action: "PASSWORD_CHANGED",
+                resourceType: "USER",
+                resourceId: user._id,
+                reason: "Account password changed successfully",
+                metadata: {
+                    sessionVersion: user.sessionVersion,
+                    passwordChangedAt: user.passwordChangedAt
+                },
+                req
+            });
+        } catch (auditErr) {
+            console.error("Failed to log PASSWORD_CHANGED audit event:", auditErr.message);
+        }
+
+        return res.status(200).json({
+            status: "success",
+            message: "Password changed successfully. Previous sessions have been revoked.",
+            sessionVersion: user.sessionVersion,
+            token
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * Revoke Active Sessions Controller
+ * POST /api/auth/revoke-sessions
+ */
+async function revokeSessionsController(req, res, next) {
+    try {
+        const user = await userModel.findById(req.user._id).select("+systemUser +sessionVersion");
+        if (!user) {
+            return res.status(404).json({
+                status: "error",
+                message: "User not found"
+            });
+        }
+
+        // Increment session version so previously issued tokens with the older version are rejected
+        user.sessionVersion = (user.sessionVersion || 1) + 1;
+        await user.save();
+
+        // Issue fresh token for the current session
+        const token = jwt.sign(
+            { id: user._id, sessionVersion: user.sessionVersion },
+            process.env.JWT_SECRET,
+            { expiresIn: "3d" }
+        );
+        res.cookie("token", token, getCookieOptions());
+
+        try {
+            await logAuditEvent({
+                actor: user._id,
+                action: "SESSIONS_REVOKED",
+                resourceType: "USER",
+                resourceId: user._id,
+                reason: "User triggered session revocation",
+                metadata: {
+                    newSessionVersion: user.sessionVersion
+                },
+                req
+            });
+        } catch (auditErr) {
+            console.error("Failed to log SESSIONS_REVOKED audit event:", auditErr.message);
+        }
+
+        return res.status(200).json({
+            status: "success",
+            message: "All other active sessions have been revoked successfully",
+            sessionVersion: user.sessionVersion,
+            token
+        });
+    } catch (err) {
+        next(err);
+    }
+}
+
+/**
+ * Get Session & Security Status Controller
+ * GET /api/auth/session-status
+ */
+async function getSessionStatusController(req, res, next) {
+    try {
+        const user = req.user;
+
+        return res.status(200).json({
+            status: "success",
+            session: {
+                active: true,
+                sessionVersion: user.sessionVersion || 1,
+                lastLoginAt: user.lastLoginAt || null,
+                passwordChangedAt: user.passwordChangedAt || null,
+                lockedUntil: user.lockedUntil || null,
+                failedLoginAttempts: user.failedLoginAttempts || 0
+            },
+            user: {
+                _id: user._id,
+                email: user.email,
+                name: user.name,
                 systemUser: Boolean(user.systemUser)
             }
         });
@@ -261,10 +579,12 @@ async function userMeController(req, res, next) {
 }
 
 module.exports = {
+    validatePasswordPolicy,
     userRegisterController,
     userloginController,
     userLogoutController,
-    userMeController
-}
-
-
+    userMeController,
+    changePasswordController,
+    revokeSessionsController,
+    getSessionStatusController
+};

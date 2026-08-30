@@ -41,6 +41,12 @@ export function AppLayout() {
             >
               Transactions
             </NavLink>
+            <NavLink
+              to="/security"
+              className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+            >
+              Security
+            </NavLink>
             {isSystemUser && (
               <>
                 <NavLink
