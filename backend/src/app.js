@@ -12,8 +12,18 @@ const accountRouter = require('./routes/account.routes');
 const transactionRouter = require('./routes/transaction.routes');
 const accountApplicationRouter = require('./routes/accountApplication.routes');
 const auditLogRouter = require('./routes/auditLog.routes');
+const reconciliationRouter = require('./routes/reconciliation.routes');
+const notificationRouter = require('./routes/notification.routes');
+const beneficiaryRouter = require('./routes/beneficiary.routes');
+const transferLimitRouter = require('./routes/transferLimit.routes');
+const { authSystemUserMiddleware } = require('./middleware/auth.middleware');
+const transferLimitController = require('./controllers/transferLimit.controller');
 
 const app = express();
+
+const systemTransferLimitRouter = express.Router();
+systemTransferLimitRouter.get('/', authSystemUserMiddleware, transferLimitController.getSystemTransferLimits);
+systemTransferLimitRouter.patch('/', authSystemUserMiddleware, transferLimitController.updateSystemTransferLimits);
 
 // Phase E: Trust Proxy configuration (for reverse proxies like Nginx/Cloudflare/AWS)
 app.set('trust proxy', 1);
@@ -51,7 +61,7 @@ app.use(
       return callback(new Error('CORS policy: Not allowed by origin'));
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
@@ -70,6 +80,11 @@ app.use('/api/accounts', accountRouter);
 app.use('/api/transactions', transactionRouter);
 app.use('/api/account-applications', accountApplicationRouter);
 app.use('/api/audit-logs', auditLogRouter);
+app.use('/api/reconciliation', reconciliationRouter);
+app.use('/api/notifications', notificationRouter);
+app.use('/api/beneficiaries', beneficiaryRouter);
+app.use('/api/transfer-limits', transferLimitRouter);
+app.use('/api/system/transfer-limits', systemTransferLimitRouter);
 
 // Phase G: 404 Handler for unmatched routes
 app.use(notFoundHandler);

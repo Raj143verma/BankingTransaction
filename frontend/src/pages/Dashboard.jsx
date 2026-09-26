@@ -372,14 +372,24 @@ export function Dashboard() {
                           </button>
                         </div>
 
-                        <div className="card-balance-row">
-                          <span className="balance-label">Available Balance:</span>
-                          <span className="balance-val">
-                            {formatCurrency(bal, acc.currency || 'INR')}
-                          </span>
+                        <div className="card-balance-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <span className="balance-label">Available Balance: </span>
+                            <span className="balance-val">
+                              {formatCurrency(bal, acc.currency || 'INR')}
+                            </span>
+                          </div>
+                          <Link
+                            to={`/accounts/${acc._id}/statement`}
+                            className="btn btn-sm btn-secondary"
+                            style={{ fontSize: '0.6875rem', padding: '0.2rem 0.5rem', textDecoration: 'none' }}
+                          >
+                            Statement
+                          </Link>
                         </div>
                       </div>
                     );
+
                   })}
                 </div>
               )}

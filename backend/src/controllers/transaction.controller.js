@@ -3,16 +3,19 @@ const ladgerModel = require("../models/ladger.model")
 const accountModel = require("../models/account.model")
 const accountApplicationModel = require("../models/accountApplication.model")
 const userModel = require("../models/user.model")
+const beneficiaryModel = require("../models/beneficiary.model")
+const transferLimitConfigModel = require("../models/transferLimitConfig.model")
 const mongoose = require("mongoose")
 const emailService = require("../services/email.service")
 const { logAuditEvent } = require("../services/auditLog.service")
+const notificationService = require("../services/notification.service")
 
 
 
 /**
  * -Create a new transaction schema
  * The 10 step transaction process is as follows:
- * 1. Validate the request 
+ * 1. Validate the request
  * 2. Validate idempotency key
  * 3. check account status
  * 4.Drive sender balance from  ladger
@@ -25,7 +28,7 @@ const { logAuditEvent } = require("../services/auditLog.service")
  * */
 
 async function createTransaction(req, res, next) {
-    
+
 
     /**
      * Step 1: Validate the request
@@ -122,6 +125,112 @@ async function createTransaction(req, res, next) {
     }
 
     /**
+     * Step 3b: Validate Beneficiary Relationship & Controls (if beneficiary exists)
+     */
+    const beneficiary = await beneficiaryModel.findOne({
+        user: req.user._id,
+        account: toAccount,
+        isDeleted: false
+    });
+
+    if (beneficiary) {
+        if (beneficiary.status === "COOLING_OFF") {
+            if (beneficiary.coolingOffExpiresAt && new Date(beneficiary.coolingOffExpiresAt) > new Date()) {
+                const remainingMs = new Date(beneficiary.coolingOffExpiresAt) - new Date();
+                const remainingMins = Math.ceil(remainingMs / 60000);
+
+                try {
+                    await logAuditEvent({
+                        actor: req.user._id,
+                        action: "TRANSFER_BLOCKED",
+                        resourceType: "BENEFICIARY",
+                        resourceId: beneficiary._id,
+                        reason: `Transfer blocked: Beneficiary is in cooling-off period (${remainingMins} min remaining)`,
+                        metadata: { fromAccount, toAccount, amount, beneficiaryId: beneficiary._id },
+                        req
+                    });
+
+                    await notificationService.createNotification({
+                        recipient: req.user._id,
+                        type: "TRANSFER_BLOCKED",
+                        title: "Transfer Blocked",
+                        message: `Transfer to '${beneficiary.nickname}' was blocked because the beneficiary is in a cooling-off period until ${new Date(beneficiary.coolingOffExpiresAt).toLocaleTimeString()}.`,
+                        severity: "WARNING",
+                        relatedResourceType: "BENEFICIARY",
+                        relatedResourceId: beneficiary._id,
+                        metadata: { fromAccount, toAccount, amount }
+                    });
+                } catch (e) {}
+
+                return res.status(400).json({
+                    message: `Transfer blocked: Beneficiary '${beneficiary.nickname}' is currently in a cooling-off period (${remainingMins} minute(s) remaining until ${new Date(beneficiary.coolingOffExpiresAt).toLocaleTimeString()}).`
+                });
+            } else {
+                // Cooling period elapsed: auto-activate
+                beneficiary.status = "ACTIVE";
+                beneficiary.activatedAt = beneficiary.activatedAt || new Date();
+                await beneficiary.save();
+            }
+        }
+
+        if (beneficiary.status === "INACTIVE" || beneficiary.status === "BLOCKED") {
+            try {
+                await logAuditEvent({
+                    actor: req.user._id,
+                    action: "TRANSFER_BLOCKED",
+                    resourceType: "BENEFICIARY",
+                    resourceId: beneficiary._id,
+                    reason: `Transfer blocked: Beneficiary status is ${beneficiary.status}`,
+                    metadata: { fromAccount, toAccount, amount, beneficiaryId: beneficiary._id },
+                    req
+                });
+
+                await notificationService.createNotification({
+                    recipient: req.user._id,
+                    type: "TRANSFER_BLOCKED",
+                    title: "Transfer Blocked",
+                    message: `Transfer to '${beneficiary.nickname}' was blocked because the beneficiary is ${beneficiary.status}.`,
+                    severity: "WARNING",
+                    relatedResourceType: "BENEFICIARY",
+                    relatedResourceId: beneficiary._id,
+                    metadata: { fromAccount, toAccount, amount }
+                });
+            } catch (e) {}
+
+            return res.status(400).json({
+                message: `Transfer blocked: Beneficiary '${beneficiary.nickname}' is ${beneficiary.status}`
+            });
+        }
+
+        if (beneficiary.maxTransferLimit !== null && beneficiary.maxTransferLimit !== undefined && amount > beneficiary.maxTransferLimit) {
+            try {
+                await logAuditEvent({
+                    actor: req.user._id,
+                    action: "TRANSFER_LIMIT_EXCEEDED",
+                    resourceType: "TRANSACTION",
+                    reason: `Transfer amount ₹${amount} exceeds beneficiary-specific limit of ₹${beneficiary.maxTransferLimit}`,
+                    metadata: { fromAccount, toAccount, amount, beneficiaryLimit: beneficiary.maxTransferLimit },
+                    req
+                });
+
+                await notificationService.createNotification({
+                    recipient: req.user._id,
+                    type: "TRANSFER_LIMIT_EXCEEDED",
+                    title: "Transfer Limit Exceeded",
+                    message: `Transfer of ₹${amount} exceeds beneficiary '${beneficiary.nickname}' limit of ₹${beneficiary.maxTransferLimit}.`,
+                    severity: "WARNING",
+                    relatedResourceType: "TRANSACTION",
+                    metadata: { fromAccount, toAccount, amount, beneficiaryLimit: beneficiary.maxTransferLimit }
+                });
+            } catch (e) {}
+
+            return res.status(400).json({
+                message: `Transaction amount ₹${amount} exceeds beneficiary transfer limit of ₹${beneficiary.maxTransferLimit}`
+            });
+        }
+    }
+
+    /**
      * Step 4: Execute transaction with serialization lock and bounded retry on transient write conflicts
      */
     const MAX_RETRIES = 3;
@@ -134,7 +243,112 @@ async function createTransaction(req, res, next) {
             session = await mongoose.startSession();
             session.startTransaction();
 
-            // Step 4a: Atomic document write/touch on source account inside transaction to establish serialization lock
+            // Step 4a: Check system-level transfer limits inside active session
+            const limitConfig = await transferLimitConfigModel.getConfig(session);
+
+            if (amount > limitConfig.perTransactionLimit) {
+                await session.abortTransaction();
+
+                try {
+                    await logAuditEvent({
+                        actor: req.user._id,
+                        action: "TRANSFER_LIMIT_EXCEEDED",
+                        resourceType: "TRANSACTION",
+                        reason: `Transaction amount ₹${amount} exceeds per-transaction limit of ₹${limitConfig.perTransactionLimit}`,
+                        metadata: { fromAccount, toAccount, amount, perTransactionLimit: limitConfig.perTransactionLimit },
+                        req
+                    });
+
+                    await notificationService.createNotification({
+                        recipient: req.user._id,
+                        type: "TRANSFER_LIMIT_EXCEEDED",
+                        title: "Transfer Limit Exceeded",
+                        message: `Transfer amount ₹${amount} exceeds the maximum per-transaction limit of ₹${limitConfig.perTransactionLimit}.`,
+                        severity: "WARNING",
+                        relatedResourceType: "TRANSACTION",
+                        metadata: { amount, perTransactionLimit: limitConfig.perTransactionLimit }
+                    });
+                } catch (e) {}
+
+                return res.status(400).json({
+                    message: `Transaction amount ₹${amount} exceeds the maximum per-transaction limit of ₹${limitConfig.perTransactionLimit}`
+                });
+            }
+
+            // Calculate authoritative daily usage inside active session
+            const startOfDay = new Date();
+            startOfDay.setHours(0, 0, 0, 0);
+            const endOfDay = new Date();
+            endOfDay.setHours(23, 59, 59, 999);
+
+            const todayCompletedTxs = await transactionModel.find({
+                fromAccount: fromAccount,
+                status: "COMPLETED",
+                createdAt: { $gte: startOfDay, $lte: endOfDay }
+            }, 'amount', { session });
+
+            const dailySpent = todayCompletedTxs.reduce((sum, tx) => sum + (tx.amount || 0), 0);
+            const dailyCount = todayCompletedTxs.length;
+
+            if (dailySpent + amount > limitConfig.dailyAmountLimit) {
+                await session.abortTransaction();
+
+                try {
+                    await logAuditEvent({
+                        actor: req.user._id,
+                        action: "TRANSFER_LIMIT_EXCEEDED",
+                        resourceType: "TRANSACTION",
+                        reason: `Daily transfer amount limit exceeded. Spent: ₹${dailySpent}, Requested: ₹${amount}, Limit: ₹${limitConfig.dailyAmountLimit}`,
+                        metadata: { fromAccount, toAccount, amount, dailySpent, dailyAmountLimit: limitConfig.dailyAmountLimit },
+                        req
+                    });
+
+                    await notificationService.createNotification({
+                        recipient: req.user._id,
+                        type: "TRANSFER_LIMIT_EXCEEDED",
+                        title: "Daily Transfer Limit Exceeded",
+                        message: `Daily transfer limit of ₹${limitConfig.dailyAmountLimit} exceeded. You have already spent ₹${dailySpent} today.`,
+                        severity: "WARNING",
+                        relatedResourceType: "TRANSACTION",
+                        metadata: { dailySpent, requested: amount, limit: limitConfig.dailyAmountLimit }
+                    });
+                } catch (e) {}
+
+                return res.status(400).json({
+                    message: `Daily transfer limit exceeded. Current daily spent: ₹${dailySpent}, requested: ₹${amount}, daily limit: ₹${limitConfig.dailyAmountLimit}, remaining allowance: ₹${Math.max(0, limitConfig.dailyAmountLimit - dailySpent)}`
+                });
+            }
+
+            if (dailyCount + 1 > limitConfig.dailyCountLimit) {
+                await session.abortTransaction();
+
+                try {
+                    await logAuditEvent({
+                        actor: req.user._id,
+                        action: "TRANSFER_LIMIT_EXCEEDED",
+                        resourceType: "TRANSACTION",
+                        reason: `Daily transaction count limit of ${limitConfig.dailyCountLimit} exceeded. Completed today: ${dailyCount}`,
+                        metadata: { fromAccount, toAccount, amount, dailyCount, dailyCountLimit: limitConfig.dailyCountLimit },
+                        req
+                    });
+
+                    await notificationService.createNotification({
+                        recipient: req.user._id,
+                        type: "TRANSFER_LIMIT_EXCEEDED",
+                        title: "Daily Transaction Count Limit Exceeded",
+                        message: `Daily transaction count limit of ${limitConfig.dailyCountLimit} exceeded. You have initiated ${dailyCount} transactions today.`,
+                        severity: "WARNING",
+                        relatedResourceType: "TRANSACTION",
+                        metadata: { dailyCount, limit: limitConfig.dailyCountLimit }
+                    });
+                } catch (e) {}
+
+                return res.status(400).json({
+                    message: `Daily transaction count limit exceeded. Maximum daily transactions allowed is ${limitConfig.dailyCountLimit}`
+                });
+            }
+
+            // Step 4b: Atomic document write/touch on source account inside transaction to establish serialization lock
             const lockedFromAccount = await accountModel.findOneAndUpdate(
                 { _id: fromAccount, status: "ACTIVE" },
                 { $inc: { __v: 1 } },
@@ -148,19 +362,19 @@ async function createTransaction(req, res, next) {
                 });
             }
 
-            // Step 4b: Derive sender balance from ledger within active session
+            // Step 4c: Derive sender balance from ledger within active session
             const balance = await lockedFromAccount.getBalance(session);
             if(balance < amount) {
                 await session.abortTransaction();
                 return res.status(400).json({
-                    message: `Insufficient balance. Current balance is ${balance}.Requested amount is ${amount}` 
+                    message: `Insufficient balance. Current balance is ${balance}.Requested amount is ${amount}`
                 });
             }
 
             // Step 5: Create a transaction with status pending
             transaction = (await transactionModel.create([{
                 fromAccount,
-                toAccount,  
+                toAccount,
                 amount,
                 idempotencyKey,
                 status: "PENDING",
@@ -184,7 +398,7 @@ async function createTransaction(req, res, next) {
 
             // Step 8: Mark transaction as completed
             await transactionModel.findByIdAndUpdate(
-                { _id: transaction._id }, 
+                { _id: transaction._id },
                 { status: "COMPLETED" },
                 { session }
             );
@@ -228,7 +442,7 @@ async function createTransaction(req, res, next) {
     }
 
     /**
-     * Step 10: Send email notification to sender and receiver
+     * Step 10: Send email & in-app notification to sender and receiver
      */
     try {
         await emailService.sendTransactionEmail(req.user.email, req.user.name, amount, toAccount);
@@ -236,12 +450,52 @@ async function createTransaction(req, res, next) {
         console.error("Failed to send transaction email:", emailErr.message);
     }
 
+    try {
+        // Notification for sender
+        await notificationService.createNotification({
+            recipient: req.user._id,
+            type: "TRANSACTION_SENT",
+            title: "Money Sent",
+            message: `You transferred ₹${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} to account ${toAccount}.`,
+            severity: "INFO",
+            relatedResourceType: "TRANSACTION",
+            relatedResourceId: transaction._id,
+            metadata: {
+                amount,
+                fromAccount,
+                toAccount,
+                transactionId: transaction._id
+            }
+        });
+
+        // Notification for receiver
+        if (toUserAccount && toUserAccount.user) {
+            await notificationService.createNotification({
+                recipient: toUserAccount.user,
+                type: "TRANSACTION_RECEIVED",
+                title: "Money Received",
+                message: `You received ₹${Number(amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} from account ${fromAccount}.`,
+                severity: "SUCCESS",
+                relatedResourceType: "TRANSACTION",
+                relatedResourceId: transaction._id,
+                metadata: {
+                    amount,
+                    fromAccount,
+                    toAccount,
+                    transactionId: transaction._id
+                }
+            });
+        }
+    } catch (notifErr) {
+        console.error("Failed to emit transaction notifications:", notifErr.message);
+    }
+
     return res.status(201).json({
         message: "Transaction completed successfully",
         transaction: transaction
     });
 }
-   
+
 
 async function createinitializeFundsTransaction(req, res, next) {
     const { toAccount, amount, idempotencyKey } = req.body;
@@ -311,7 +565,7 @@ async function createinitializeFundsTransaction(req, res, next) {
     const fromUserAccount = await accountModel.findOne({
         user: req.user._id,
         status: "ACTIVE"
-    })  
+    })
     if(!fromUserAccount) {
         return res.status(400).json({
             message: "System user account not found"
@@ -440,7 +694,7 @@ async function createinitializeFundsTransaction(req, res, next) {
  * GET /api/transactions
  * Retrieve paginated and filtered transactions for the currently authenticated user.
  * A transaction is relevant if the user owns either fromAccount or toAccount.
- * 
+ *
  * Supports query parameters:
  *  - page (default: 1)
  *  - limit (default: 10, max: 50)
@@ -843,6 +1097,8 @@ async function reverseTransactionController(req, res, next) {
         let reversedTransaction = null;
         let fromAccHolderName = "Account Holder";
         let toAccHolderName = "Account Holder";
+        let fromAccUserId = null;
+        let toAccUserId = null;
 
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             let session;
@@ -960,6 +1216,8 @@ async function reverseTransactionController(req, res, next) {
                 reversedTransaction = lockedTx;
                 fromAccHolderName = fromAccountDoc.accountHolderName || "Account Holder";
                 toAccHolderName = toAccountDoc.accountHolderName || "Account Holder";
+                fromAccUserId = fromAccountDoc.user;
+                toAccUserId = toAccountDoc.user;
                 break;
             } catch (err) {
                 if (session && session.inTransaction && session.inTransaction()) {
@@ -1006,6 +1264,48 @@ async function reverseTransactionController(req, res, next) {
                 status: "error",
                 message: "Failed to reverse transaction due to a concurrent conflict. Please try again."
             });
+        }
+
+        try {
+            // Notification to original sender (funds refunded)
+            if (fromAccUserId) {
+                await notificationService.createNotification({
+                    recipient: fromAccUserId,
+                    type: "TRANSACTION_REVERSED",
+                    title: "Transaction Refunded",
+                    message: `Transaction of ₹${Number(reversedTransaction.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been reversed and credited back to your account. Reason: ${trimmedReason}`,
+                    severity: "SUCCESS",
+                    relatedResourceType: "TRANSACTION",
+                    relatedResourceId: reversedTransaction._id,
+                    metadata: {
+                        amount: reversedTransaction.amount,
+                        fromAccount: reversedTransaction.fromAccount,
+                        reason: trimmedReason,
+                        transactionId: reversedTransaction._id
+                    }
+                });
+            }
+
+            // Notification to original receiver (funds debited back)
+            if (toAccUserId) {
+                await notificationService.createNotification({
+                    recipient: toAccUserId,
+                    type: "TRANSACTION_REVERSED",
+                    title: "Transaction Reversed",
+                    message: `Transaction of ₹${Number(reversedTransaction.amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been reversed and debited from your account. Reason: ${trimmedReason}`,
+                    severity: "WARNING",
+                    relatedResourceType: "TRANSACTION",
+                    relatedResourceId: reversedTransaction._id,
+                    metadata: {
+                        amount: reversedTransaction.amount,
+                        toAccount: reversedTransaction.toAccount,
+                        reason: trimmedReason,
+                        transactionId: reversedTransaction._id
+                    }
+                });
+            }
+        } catch (notifErr) {
+            console.error("Failed to emit reversal notifications:", notifErr.message);
         }
 
         return res.status(200).json({
@@ -1299,4 +1599,4 @@ module.exports = {
     getTransactionSummary,
     reverseTransactionController,
     getSystemTransactionsController
-};
+};

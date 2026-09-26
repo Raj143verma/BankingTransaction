@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const emailService = require("../services/email.service");
 const tokenBlacklistModel = require("../models/blackList.model");
 const { logAuditEvent } = require("../services/auditLog.service");
+const notificationService = require("../services/notification.service");
 
 const SYSTEM_LOGIN_MAX_ATTEMPTS = parseInt(process.env.SYSTEM_LOGIN_MAX_ATTEMPTS || "5", 10);
 const SYSTEM_LOGIN_LOCKOUT_MINUTES = parseInt(process.env.SYSTEM_LOGIN_LOCKOUT_MINUTES || "15", 10);
@@ -246,6 +247,34 @@ async function userloginController(req, res, next) {
                 console.error("Failed to log audit event on failed login:", auditErr.message);
             }
 
+            try {
+                if (isLockedNow) {
+                    await notificationService.createNotification({
+                        recipient: user._id,
+                        type: "SECURITY_ACCOUNT_LOCKED",
+                        title: "Account Temporarily Locked",
+                        message: `Your account has been temporarily locked due to consecutive failed login attempts. Lockout until ${user.lockedUntil ? new Date(user.lockedUntil).toLocaleTimeString() : '15 minutes'}.`,
+                        severity: "ERROR",
+                        relatedResourceType: "USER",
+                        relatedResourceId: user._id,
+                        metadata: { failedAttempts: user.failedLoginAttempts, lockedUntil: user.lockedUntil }
+                    });
+                } else {
+                    await notificationService.createNotification({
+                        recipient: user._id,
+                        type: "SECURITY_LOGIN_FAILED",
+                        title: "Failed Login Attempt",
+                        message: `A failed login attempt was detected on your account (Attempt ${user.failedLoginAttempts}).`,
+                        severity: "WARNING",
+                        relatedResourceType: "USER",
+                        relatedResourceId: user._id,
+                        metadata: { failedAttempts: user.failedLoginAttempts }
+                    });
+                }
+            } catch (notifErr) {
+                console.error("Failed to emit notification on failed login:", notifErr.message);
+            }
+
             if (isLockedNow) {
                 return res.status(423).json({
                     status: "error",
@@ -292,6 +321,21 @@ async function userloginController(req, res, next) {
             } catch (auditErr) {
                 console.error("Failed to log SYSTEM_LOGIN event:", auditErr.message);
             }
+        }
+
+        try {
+            await notificationService.createNotification({
+                recipient: user._id,
+                type: "SECURITY_LOGIN",
+                title: "New Login Detected",
+                message: `You have successfully signed in to your account at ${new Date().toLocaleTimeString()}.`,
+                severity: "INFO",
+                relatedResourceType: "USER",
+                relatedResourceId: user._id,
+                metadata: { loginTime: user.lastLoginAt }
+            });
+        } catch (notifErr) {
+            console.error("Failed to emit notification on successful login:", notifErr.message);
         }
 
         return res.status(200).json({
@@ -484,6 +528,21 @@ async function changePasswordController(req, res, next) {
             console.error("Failed to log PASSWORD_CHANGED audit event:", auditErr.message);
         }
 
+        try {
+            await notificationService.createNotification({
+                recipient: user._id,
+                type: "SECURITY_PASSWORD_CHANGED",
+                title: "Password Changed",
+                message: "Your account password was updated successfully. Previous active sessions were revoked.",
+                severity: "WARNING",
+                relatedResourceType: "USER",
+                relatedResourceId: user._id,
+                metadata: { sessionVersion: user.sessionVersion }
+            });
+        } catch (notifErr) {
+            console.error("Failed to emit notification on password change:", notifErr.message);
+        }
+
         return res.status(200).json({
             status: "success",
             message: "Password changed successfully. Previous sessions have been revoked.",
@@ -535,6 +594,21 @@ async function revokeSessionsController(req, res, next) {
             });
         } catch (auditErr) {
             console.error("Failed to log SESSIONS_REVOKED audit event:", auditErr.message);
+        }
+
+        try {
+            await notificationService.createNotification({
+                recipient: user._id,
+                type: "SECURITY_SESSIONS_REVOKED",
+                title: "Sessions Revoked",
+                message: "All other active sessions for your account have been successfully terminated.",
+                severity: "WARNING",
+                relatedResourceType: "USER",
+                relatedResourceId: user._id,
+                metadata: { sessionVersion: user.sessionVersion }
+            });
+        } catch (notifErr) {
+            console.error("Failed to emit notification on sessions revoked:", notifErr.message);
         }
 
         return res.status(200).json({

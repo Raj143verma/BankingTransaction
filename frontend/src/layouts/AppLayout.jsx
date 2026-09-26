@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
+import { NotificationCenter } from '../components/NotificationCenter';
 
 export function AppLayout() {
   const { user, logout } = useAuth();
@@ -34,6 +35,12 @@ export function AppLayout() {
               className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
             >
               Accounts
+            </NavLink>
+            <NavLink
+              to="/beneficiaries"
+              className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+            >
+              Beneficiaries
             </NavLink>
             <NavLink
               to="/transactions"
@@ -79,25 +86,35 @@ export function AppLayout() {
                 >
                   Audit Trail
                 </NavLink>
+                <NavLink
+                  to="/system/reconciliation"
+                  className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
+                >
+                  Reconciliation
+                </NavLink>
               </>
             )}
           </nav>
 
-          <div className="user-profile">
-            <div className="user-info">
-              <span className="user-name">
-                {user?.name || 'Account User'}
-                {isSystemUser && (
-                  <span className="badge badge-system" style={{ marginLeft: '0.375rem', fontSize: '0.6875rem' }}>
-                    SYSTEM
-                  </span>
-                )}
-              </span>
-              <span className="user-email">{user?.email || ''}</span>
+          <div className="header-actions" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <NotificationCenter />
+
+            <div className="user-profile">
+              <div className="user-info">
+                <span className="user-name">
+                  {user?.name || 'Account User'}
+                  {isSystemUser && (
+                    <span className="badge badge-system" style={{ marginLeft: '0.375rem', fontSize: '0.6875rem' }}>
+                      SYSTEM
+                    </span>
+                  )}
+                </span>
+                <span className="user-email">{user?.email || ''}</span>
+              </div>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={handleLogout}>
+                Sign Out
+              </button>
             </div>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={handleLogout}>
-              Sign Out
-            </button>
           </div>
         </div>
       </header>

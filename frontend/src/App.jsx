@@ -17,6 +17,9 @@ import { SystemAccounts } from './pages/SystemAccounts';
 import { SystemTransactions } from './pages/SystemTransactions';
 import { SystemAuditLogs } from './pages/SystemAuditLogs';
 import { SecuritySettings } from './pages/SecuritySettings';
+import { AccountStatement } from './pages/AccountStatement';
+import { SystemReconciliation } from './pages/SystemReconciliation';
+import { Beneficiaries } from './pages/Beneficiaries';
 import { NotFound } from './pages/NotFound';
 
 export function App() {
@@ -38,18 +41,23 @@ export function App() {
         <Route element={<AppLayout />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/accounts/:id/statement" element={<AccountStatement />} />
           <Route path="/accounts/open" element={<AccountOpening />} />
           <Route path="/accounts/applications" element={<AccountApplications />} />
+          <Route path="/beneficiaries" element={<Beneficiaries />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/security" element={<SecuritySettings />} />
           <Route path="/system/security" element={<SecuritySettings />} />
           <Route path="/system/accounts" element={<SystemAccounts />} />
+          <Route path="/system/accounts/:id/statement" element={<AccountStatement />} />
           <Route path="/system/transactions" element={<SystemTransactions />} />
           <Route path="/system/audit-logs" element={<SystemAuditLogs />} />
+          <Route path="/system/reconciliation" element={<SystemReconciliation />} />
           <Route path="/system/funds" element={<SystemFunds />} />
           <Route path="/system/applications" element={<SystemApplications />} />
         </Route>
       </Route>
+
 
       {/* 404 Catch-All */}
       <Route path="*" element={<NotFound />} />

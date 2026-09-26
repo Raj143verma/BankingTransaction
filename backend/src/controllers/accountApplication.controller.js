@@ -4,6 +4,7 @@ const accountModel = require('../models/account.model');
 const transactionModel = require('../models/transaction.model');
 const ladgerModel = require('../models/ladger.model');
 const { logAuditEvent } = require('../services/auditLog.service');
+const notificationService = require('../services/notification.service');
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MOBILE_REGEX = /^[6-9]\d{9}$/;
@@ -560,6 +561,26 @@ async function approveAccountApplicationController(req, res, next) {
 
     await session.commitTransaction();
 
+    try {
+      await notificationService.createNotification({
+        recipient: application.user,
+        type: 'APPLICATION_APPROVED',
+        title: 'Application Approved',
+        message: `Your account application for ${application.accountType || 'SAVINGS'} account has been approved and account ${newAccount._id} has been opened!`,
+        severity: 'SUCCESS',
+        relatedResourceType: 'ACCOUNT_APPLICATION',
+        relatedResourceId: application._id,
+        metadata: {
+          applicationId: application._id,
+          createdAccountId: newAccount._id,
+          accountType: application.accountType || 'SAVINGS',
+          initialDeposit: application.initialDeposit || 0,
+        },
+      });
+    } catch (notifErr) {
+      console.error('Failed to emit application approval notification:', notifErr.message);
+    }
+
     return res.status(200).json({
       message: 'Application approved successfully and deposit account created',
       application,
@@ -662,6 +683,25 @@ async function rejectAccountApplicationController(req, res, next) {
       },
       req,
     });
+
+    try {
+      await notificationService.createNotification({
+        recipient: application.user,
+        type: 'APPLICATION_REJECTED',
+        title: 'Application Rejected',
+        message: `Your account application for ${application.accountType || 'SAVINGS'} account was rejected. Reason: ${trimmedReason}`,
+        severity: 'ERROR',
+        relatedResourceType: 'ACCOUNT_APPLICATION',
+        relatedResourceId: application._id,
+        metadata: {
+          applicationId: application._id,
+          reason: trimmedReason,
+          accountType: application.accountType || 'SAVINGS',
+        },
+      });
+    } catch (notifErr) {
+      console.error('Failed to emit application rejection notification:', notifErr.message);
+    }
 
     return res.status(200).json({
       message: 'Application rejected successfully',

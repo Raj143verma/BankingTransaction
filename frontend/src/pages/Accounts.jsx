@@ -281,12 +281,19 @@ export function Accounts() {
                   </div>
                 </div>
 
-                <div className="account-card-footer">
+                <div className="account-card-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
                   <span>Currency: <strong>{account.currency || 'INR'}</strong></span>
-                  <span>Opened: {formatDate(account.createdAt)}</span>
+                  <Link
+                    to={`/accounts/${account._id}/statement`}
+                    className="btn btn-sm btn-primary"
+                    style={{ textDecoration: 'none', padding: '0.25rem 0.75rem', fontSize: '0.75rem' }}
+                  >
+                    📄 View Statement
+                  </Link>
                 </div>
               </div>
             );
+
           })}
         </div>
       )}

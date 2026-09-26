@@ -462,10 +462,20 @@ export function SystemAccounts() {
                                 Reactivate
                               </button>
                             )}
+
+                            <Link
+                              to={`/system/accounts/${acc._id}/statement`}
+                              className="btn btn-sm btn-secondary"
+                              style={{ textDecoration: 'none' }}
+                              title="View and export account statement"
+                            >
+                              Statement
+                            </Link>
                           </div>
                         </td>
                       </tr>
                     );
+
                   })}
                 </tbody>
               </table>

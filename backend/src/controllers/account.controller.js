@@ -3,6 +3,7 @@ const accountModel = require("../models/account.model");
 const userModel = require("../models/user.model");
 const accountApplicationModel = require("../models/accountApplication.model");
 const { logAuditEvent } = require("../services/auditLog.service");
+const notificationService = require("../services/notification.service");
 
 async function createAccountController(req, res, next) {
   try {
@@ -290,6 +291,47 @@ async function updateAccountStatusController(req, res, next) {
       },
       req,
     });
+
+    try {
+      const targetUserId = updatedAccount.user?._id || updatedAccount.user;
+      if (targetUserId) {
+        let notifTitle = "Account Status Updated";
+        let notifSeverity = "INFO";
+        let notifMsg = `Your account (${holderName}) status has been changed to ${normalizedStatus}. Reason: ${trimmedReason}`;
+
+        if (normalizedStatus === "SUSPENDED") {
+          notifTitle = "Account Suspended";
+          notifSeverity = "WARNING";
+          notifMsg = `Your account (${holderName}) has been suspended. Reason: ${trimmedReason}`;
+        } else if (normalizedStatus === "ACTIVE") {
+          notifTitle = "Account Reactivated";
+          notifSeverity = "SUCCESS";
+          notifMsg = `Your account (${holderName}) has been reactivated and is now active. Reason: ${trimmedReason}`;
+        } else if (normalizedStatus === "INACTIVE") {
+          notifTitle = "Account Deactivated";
+          notifSeverity = "ERROR";
+          notifMsg = `Your account (${holderName}) has been deactivated. Reason: ${trimmedReason}`;
+        }
+
+        await notificationService.createNotification({
+          recipient: targetUserId,
+          type: actionType,
+          title: notifTitle,
+          message: notifMsg,
+          severity: notifSeverity,
+          relatedResourceType: "ACCOUNT",
+          relatedResourceId: updatedAccount._id,
+          metadata: {
+            previousStatus: currentStatus,
+            newStatus: normalizedStatus,
+            reason: trimmedReason,
+            accountId: updatedAccount._id,
+          },
+        });
+      }
+    } catch (notifErr) {
+      console.error("Failed to emit account status notification:", notifErr.message);
+    }
 
     return res.status(200).json({
       status: "success",

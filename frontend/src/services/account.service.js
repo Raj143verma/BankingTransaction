@@ -49,6 +49,15 @@ export const accountService = {
     const response = await api.post('/accounts', accountData);
     return response.data;
   },
+
+  /**
+   * Fetch account statement
+   * GET /api/accounts/:id/statement
+   */
+  async getAccountStatement(id, params = {}) {
+    const response = await api.get(`/accounts/${id}/statement`, { params });
+    return response.data;
+  },
 };
 
 export default accountService;

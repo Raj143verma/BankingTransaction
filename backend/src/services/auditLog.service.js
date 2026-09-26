@@ -1,6 +1,40 @@
 const auditLogModel = require('../models/auditLog.model');
 
 /**
+ * Recursively strip sensitive credentials from audit log metadata
+ */
+function sanitizeMetadata(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) {
+    return obj.map(sanitizeMetadata);
+  }
+  const clean = {};
+  const SENSITIVE_KEYS = [
+    'password',
+    'newpassword',
+    'currentpassword',
+    'token',
+    'jwt',
+    'secret',
+    'authorization',
+    'cookie',
+    'cookies',
+  ];
+
+  for (const [key, val] of Object.entries(obj)) {
+    if (SENSITIVE_KEYS.includes(key.toLowerCase())) {
+      continue;
+    }
+    if (val && typeof val === 'object') {
+      clean[key] = sanitizeMetadata(val);
+    } else {
+      clean[key] = val;
+    }
+  }
+  return clean;
+}
+
+/**
  * Record an append-only audit event for administrative and security-sensitive system operations.
  *
  * @param {Object} params
@@ -60,7 +94,7 @@ async function logAuditEvent(params, session = null) {
     previousState,
     newState,
     reason: reason ? String(reason).trim() : null,
-    metadata: metadata || {},
+    metadata: sanitizeMetadata(metadata),
     ipAddress: ipAddress ? String(ipAddress).slice(0, 100) : null,
     userAgent: userAgent ? String(userAgent).slice(0, 255) : null,
   };

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { accountService } from '../services/account.service';
 import { transactionService } from '../services/transaction.service';
+import { beneficiaryService } from '../services/beneficiary.service';
 import { formatCurrency, formatDate } from '../utils/formatters';
 
 export function Transactions() {
@@ -17,7 +18,12 @@ export function Transactions() {
   const [loadingBalance, setLoadingBalance] = useState(false);
   const [balanceError, setBalanceError] = useState(false);
 
-  const [toAccount, setToAccount] = useState('');
+  // Beneficiaries & Transfer Limits State
+  const [beneficiaries, setBeneficiaries] = useState([]);
+  const [selectedBeneficiaryId, setSelectedBeneficiaryId] = useState('');
+  const [limitsSummary, setLimitsSummary] = useState(null);
+
+  const [toAccount, setToAccount] = useState(searchParams.get('toAccount') || '');
   const [amount, setAmount] = useState('');
 
   const [formErrors, setFormErrors] = useState({});
@@ -184,18 +190,41 @@ export function Transactions() {
     }
   }, [filterInputs, setSearchParams]);
 
+  // Load beneficiaries for the authenticated user
+  const loadBeneficiaries = useCallback(async () => {
+    try {
+      const data = await beneficiaryService.getBeneficiaries();
+      const list = Array.isArray(data?.beneficiaries) ? data.beneficiaries : [];
+      setBeneficiaries(list);
+    } catch {
+      setBeneficiaries([]);
+    }
+  }, []);
+
+  // Load authoritative transfer limits for the source account
+  const loadLimits = useCallback(async (accountId) => {
+    try {
+      const data = await beneficiaryService.getTransferLimits(accountId);
+      setLimitsSummary(data?.limits || null);
+    } catch {
+      setLimitsSummary(null);
+    }
+  }, []);
+
   useEffect(() => {
     loadAccounts();
+    loadBeneficiaries();
     const initialPage = parseInt(searchParams.get('page'), 10) || 1;
     loadTransactions(initialPage, filterInputs);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // When source account changes, fetch its derived balance
+  // When source account changes, fetch its derived balance and limit usage
   useEffect(() => {
     if (fromAccount) {
       loadSourceBalance(fromAccount);
+      loadLimits(fromAccount);
     }
-  }, [fromAccount, loadSourceBalance]);
+  }, [fromAccount, loadSourceBalance, loadLimits]);
 
   // Client-side transfer form validation
   const validateForm = () => {
@@ -222,6 +251,10 @@ export function Transactions() {
       errors.amount = 'Transfer amount must be greater than zero';
     } else if (sourceBalance !== null && numAmount > sourceBalance) {
       errors.amount = `Amount exceeds available balance (${formatCurrency(sourceBalance)})`;
+    } else if (limitsSummary && numAmount > limitsSummary.perTransactionLimit) {
+      errors.amount = `Amount exceeds per-transaction limit of ${formatCurrency(limitsSummary.perTransactionLimit)}`;
+    } else if (limitsSummary && numAmount > limitsSummary.remainingDailyAmount) {
+      errors.amount = `Amount exceeds remaining daily allowance of ${formatCurrency(limitsSummary.remainingDailyAmount)}`;
     }
 
     return errors;
@@ -474,6 +507,42 @@ export function Transactions() {
                   </div>
                 </div>
 
+                {/* Saved Beneficiary Selector (if available) */}
+                {beneficiaries.length > 0 && (
+                  <div className="form-group">
+                    <label htmlFor="beneficiarySelect">Saved Payees / Beneficiaries</label>
+                    <select
+                      id="beneficiarySelect"
+                      value={selectedBeneficiaryId}
+                      onChange={(e) => {
+                        const bId = e.target.value;
+                        setSelectedBeneficiaryId(bId);
+                        if (bId) {
+                          const found = beneficiaries.find((b) => b._id === bId);
+                          if (found) {
+                            const targetId = found.account?._id || found.account || '';
+                            handleInputChange('toAccount', targetId);
+                          }
+                        }
+                      }}
+                      disabled={isSubmitting}
+                    >
+                      <option value="">-- Choose a Saved Payee or Enter Manually --</option>
+                      {beneficiaries.map((b) => {
+                        const targetId = b.account?._id || b.account || '';
+                        const isCooling = b.status === 'COOLING_OFF' && b.coolingOffExpiresAt && new Date(b.coolingOffExpiresAt) > new Date();
+                        const limitNote = b.maxTransferLimit ? ` [Limit: ₹${b.maxTransferLimit.toLocaleString('en-IN')}]` : '';
+                        const statusNote = isCooling ? ' (Cooling Off)' : b.status !== 'ACTIVE' ? ` (${b.status})` : '';
+                        return (
+                          <option key={b._id} value={b._id} disabled={isCooling || b.status !== 'ACTIVE'}>
+                            {b.nickname} ({b.accountHolderName || 'Payee'} - {targetId.slice(-6)}){limitNote}{statusNote}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                )}
+
                 {/* Destination Account ID Input */}
                 <div className="form-group">
                   <label htmlFor="toAccount">Destination Account ID (Credit)</label>
@@ -483,7 +552,10 @@ export function Transactions() {
                     type="text"
                     placeholder="e.g. 6a8aedd4ab1d773010152dee"
                     value={toAccount}
-                    onChange={(e) => handleInputChange('toAccount', e.target.value)}
+                    onChange={(e) => {
+                      handleInputChange('toAccount', e.target.value);
+                      setSelectedBeneficiaryId('');
+                    }}
                     disabled={isSubmitting}
                     className={formErrors.toAccount ? 'input-error' : ''}
                     autoComplete="off"
@@ -510,7 +582,10 @@ export function Transactions() {
                             marginRight: '0.5rem',
                             padding: 0,
                           }}
-                          onClick={() => handleInputChange('toAccount', acc._id)}
+                          onClick={() => {
+                            handleInputChange('toAccount', acc._id);
+                            setSelectedBeneficiaryId('');
+                          }}
                         >
                           {acc._id.slice(-6)}
                         </button>
@@ -539,6 +614,22 @@ export function Transactions() {
                     Transactions are serialized and validated against the immutable ledger.
                   </span>
                 </div>
+
+                {/* Transfer Limits Overview Card */}
+                {limitsSummary && (
+                  <div style={{ background: '#f8fafc', padding: '0.875rem 1rem', borderRadius: '6px', border: '1px solid #e2e8f0', marginBottom: '1rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.75rem', color: '#64748b' }}>
+                      <span>Daily Allowance Remaining:</span>
+                      <strong style={{ color: limitsSummary.remainingDailyAmount > 0 ? '#059669' : '#dc2626' }}>
+                        {formatCurrency(limitsSummary.remainingDailyAmount)}
+                      </strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#64748b' }}>
+                      <span>Per-Transfer Max: {formatCurrency(limitsSummary.perTransactionLimit)}</span>
+                      <span>Transfers Today: {limitsSummary.dailyCount} / {limitsSummary.dailyCountLimit}</span>
+                    </div>
+                  </div>
+                )}
 
                 {/* Submit Action */}
                 <button
