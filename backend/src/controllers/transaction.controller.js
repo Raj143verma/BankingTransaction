@@ -1592,11 +1592,613 @@ async function getSystemTransactionsController(req, res, next) {
     }
 }
 
+/**
+ * Resolve or initialize the designated CASH_VAULT account under the institutional system user
+ */
+async function getOrCreateCashVaultAccount(systemUser, session = null) {
+    if (!systemUser || !systemUser._id) {
+        throw new Error("System user not found");
+    }
+
+    const query = {
+        user: systemUser._id,
+        accountHolderName: "System Cash Vault",
+        status: "ACTIVE"
+    };
+
+    let vaultAccount = session
+        ? await accountModel.findOne(query).session(session)
+        : await accountModel.findOne(query);
+
+    if (!vaultAccount) {
+        const createOpts = session ? { session } : {};
+        const created = await accountModel.create([
+            {
+                user: systemUser._id,
+                accountHolderName: "System Cash Vault",
+                accountType: "CURRENT",
+                status: "ACTIVE",
+                currency: "INR"
+            }
+        ], createOpts);
+        vaultAccount = created[0];
+    }
+
+    return vaultAccount;
+}
+
+/**
+ * POST /api/transactions/deposit
+ * Direct cash deposit into customer account
+ * Double-entry: DEBIT Cash Vault, CREDIT Customer Account
+ */
+async function depositCashController(req, res, next) {
+    const { account, toAccount, accountId, amount, idempotencyKey } = req.body;
+    const targetAccountId = account || toAccount || accountId;
+
+    if (!targetAccountId || amount === undefined || amount === null || !idempotencyKey) {
+        return res.status(400).json({
+            message: "Account, amount, and idempotencyKey are required for cash deposit"
+        });
+    }
+
+    const numericAmount = Number(amount);
+    if (typeof amount !== "number" || !Number.isFinite(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({
+            message: "Deposit amount must be a finite number greater than zero"
+        });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(targetAccountId)) {
+        return res.status(400).json({
+            message: "Invalid account ID"
+        });
+    }
+
+    const cleanAmount = Math.round(numericAmount * 100) / 100;
+
+    // 1. Idempotency Check
+    const existingTx = await transactionModel.findOne({ idempotencyKey });
+    if (existingTx) {
+        if (existingTx.status === "COMPLETED") {
+            return res.status(200).json({
+                status: "success",
+                message: "Transaction with this idempotency key already exists and is completed",
+                transaction: existingTx
+            });
+        }
+        if (existingTx.status === "PENDING") {
+            return res.status(200).json({
+                status: "pending",
+                message: "Transaction with this idempotency key is currently pending"
+            });
+        }
+        if (existingTx.status === "FAILED" || existingTx.status === "REVERSED") {
+            return res.status(400).json({
+                status: "error",
+                message: `Transaction with this idempotency key already exists and is ${existingTx.status.toLowerCase()}`
+            });
+        }
+    }
+
+    // 2. Resolve target account & ownership
+    const targetAccountDoc = await accountModel.findById(targetAccountId).populate("user", "name email systemUser");
+    if (!targetAccountDoc) {
+        return res.status(404).json({
+            status: "error",
+            message: "Destination account not found"
+        });
+    }
+
+    if (targetAccountDoc.status !== "ACTIVE") {
+        return res.status(400).json({
+            status: "error",
+            message: `Destination account is ${targetAccountDoc.status}. Deposits can only be made to ACTIVE accounts`
+        });
+    }
+
+    // Customer IDOR check: customer must own the account (unless system user)
+    const isOwner = targetAccountDoc.user && targetAccountDoc.user._id.toString() === req.user._id.toString();
+    const isSysAdmin = req.user.systemUser === true;
+
+    if (!isOwner && !isSysAdmin) {
+        return res.status(403).json({
+            status: "error",
+            message: "Forbidden: You can only deposit cash into your own accounts"
+        });
+    }
+
+    if (targetAccountDoc.user?.systemUser === true && !isSysAdmin) {
+        return res.status(400).json({
+            status: "error",
+            message: "Direct cash deposits cannot be made to institutional system accounts"
+        });
+    }
+
+    // 3. Check transfer limit (per-transaction limit)
+    const limitConfig = await transferLimitConfigModel.getConfig();
+    if (cleanAmount > limitConfig.perTransactionLimit) {
+        return res.status(400).json({
+            status: "error",
+            message: `Deposit amount ₹${cleanAmount} exceeds the maximum per-transaction limit of ₹${limitConfig.perTransactionLimit}`
+        });
+    }
+
+    // 4. Resolve System User and Cash Vault Account
+    const sysUser = await userModel.findOne({ systemUser: true });
+    if (!sysUser) {
+        return res.status(500).json({
+            status: "error",
+            message: "Institutional system user not configured"
+        });
+    }
+
+    // 5. Execute within MongoDB ACID Transaction with retry
+    const MAX_RETRIES = 5;
+    let completedTx = null;
+    let vaultAccountDoc = null;
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        let session;
+        try {
+            session = await mongoose.startSession();
+            session.startTransaction();
+
+            vaultAccountDoc = await getOrCreateCashVaultAccount(sysUser, session);
+
+            if (vaultAccountDoc._id.toString() === targetAccountDoc._id.toString()) {
+                await session.abortTransaction();
+                return res.status(400).json({
+                    status: "error",
+                    message: "Source and destination accounts cannot be the same"
+                });
+            }
+
+            // Serialization write-lock on customer account
+            await accountModel.findOneAndUpdate(
+                { _id: targetAccountDoc._id },
+                { $inc: { __v: 1 } },
+                { session }
+            );
+
+            // Create Transaction record
+            const txArray = await transactionModel.create([
+                {
+                    fromAccount: vaultAccountDoc._id,
+                    toAccount: targetAccountDoc._id,
+                    amount: cleanAmount,
+                    idempotencyKey,
+                    status: "PENDING"
+                }
+            ], { session });
+            const tx = txArray[0];
+
+            // Create balancing double-entry ledger entries
+            await ladgerModel.create([{
+                account: vaultAccountDoc._id,
+                amount: cleanAmount,
+                transaction: tx._id,
+                type: "DEBIT"
+            }], { session });
+
+            await ladgerModel.create([{
+                account: targetAccountDoc._id,
+                amount: cleanAmount,
+                transaction: tx._id,
+                type: "CREDIT"
+            }], { session });
+
+            // Mark transaction as COMPLETED
+            await transactionModel.findByIdAndUpdate(
+                tx._id,
+                { status: "COMPLETED" },
+                { session }
+            );
+
+            await session.commitTransaction();
+            completedTx = tx;
+            break;
+        } catch (err) {
+            if (session && session.inTransaction && session.inTransaction()) {
+                try { await session.abortTransaction(); } catch (e) {}
+            }
+            if (session) {
+                try { await session.endSession(); } catch (e) {}
+            }
+
+            const isTransient = (err.hasErrorLabel && (err.hasErrorLabel("TransientTransactionError") || err.hasErrorLabel("UnknownTransactionCommitResult"))) ||
+                err.code === 112 ||
+                err.codeName === "WriteConflict" ||
+                (err.message && /write conflict/i.test(err.message));
+
+            if (isTransient && attempt < MAX_RETRIES - 1) {
+                await new Promise(r => setTimeout(r, 20 * Math.pow(2, attempt) + Math.floor(Math.random() * 30)));
+                continue;
+            }
+
+            if (err.code === 11000) {
+                const racedTx = await transactionModel.findOne({ idempotencyKey });
+                if (racedTx && racedTx.status === "COMPLETED") {
+                    return res.status(200).json({
+                        success: true,
+                        status: "success",
+                        message: "Transaction with this idempotency key already exists and is completed",
+                        transaction: racedTx
+                    });
+                }
+            }
+
+            return next(err);
+        } finally {
+            if (session) {
+                try { await session.endSession(); } catch (e) {}
+            }
+        }
+    }
+
+    if (!completedTx) {
+        return res.status(500).json({
+            status: "error",
+            message: "Deposit failed due to concurrent transaction conflict. Please retry."
+        });
+    }
+
+    // 6. Audit & Notification
+    try {
+        await logAuditEvent({
+            actor: req.user._id,
+            action: "CASH_DEPOSIT",
+            resourceType: "TRANSACTION",
+            resourceId: completedTx._id,
+            reason: `Cash deposit of ₹${cleanAmount} into account ${targetAccountDoc.accountHolderName || targetAccountId}`,
+            metadata: {
+                amount: cleanAmount,
+                targetAccount: targetAccountId,
+                vaultAccount: vaultAccountDoc._id,
+                transactionId: completedTx._id
+            },
+            req
+        });
+    } catch (auditErr) {
+        console.error("Failed to log deposit audit:", auditErr.message);
+    }
+
+    try {
+        await notificationService.createNotification({
+            recipient: targetAccountDoc.user._id || targetAccountDoc.user,
+            type: "TRANSACTION_RECEIVED",
+            title: "Cash Deposit Successful",
+            message: `₹${cleanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been deposited into your account ${targetAccountId}.`,
+            severity: "SUCCESS",
+            relatedResourceType: "TRANSACTION",
+            relatedResourceId: completedTx._id,
+            metadata: {
+                amount: cleanAmount,
+                account: targetAccountId,
+                transactionId: completedTx._id
+            }
+        });
+    } catch (notifErr) {
+        console.error("Failed to emit deposit notification:", notifErr.message);
+    }
+
+    return res.status(201).json({
+        success: true,
+        status: "success",
+        message: `Cash deposit of ₹${cleanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })} completed successfully`,
+        transaction: completedTx
+    });
+}
+
+/**
+ * POST /api/transactions/withdraw
+ * Direct cash withdrawal from customer account
+ * Double-entry: DEBIT Customer Account, CREDIT Cash Vault
+ */
+async function withdrawCashController(req, res, next) {
+    const { account, fromAccount, accountId, amount, idempotencyKey } = req.body;
+    const sourceAccountId = account || fromAccount || accountId;
+
+    if (!sourceAccountId || amount === undefined || amount === null || !idempotencyKey) {
+        return res.status(400).json({
+            message: "Account, amount, and idempotencyKey are required for cash withdrawal"
+        });
+    }
+
+    const numericAmount = Number(amount);
+    if (typeof amount !== "number" || !Number.isFinite(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({
+            message: "Withdrawal amount must be a finite number greater than zero"
+        });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sourceAccountId)) {
+        return res.status(400).json({
+            message: "Invalid account ID"
+        });
+    }
+
+    const cleanAmount = Math.round(numericAmount * 100) / 100;
+
+    // 1. Idempotency Check
+    const existingTx = await transactionModel.findOne({ idempotencyKey });
+    if (existingTx) {
+        if (existingTx.status === "COMPLETED") {
+            return res.status(200).json({
+                status: "success",
+                message: "Transaction with this idempotency key already exists and is completed",
+                transaction: existingTx
+            });
+        }
+        if (existingTx.status === "PENDING") {
+            return res.status(200).json({
+                status: "pending",
+                message: "Transaction with this idempotency key is currently pending"
+            });
+        }
+        if (existingTx.status === "FAILED" || existingTx.status === "REVERSED") {
+            return res.status(400).json({
+                status: "error",
+                message: `Transaction with this idempotency key already exists and is ${existingTx.status.toLowerCase()}`
+            });
+        }
+    }
+
+    // 2. Resolve source account & ownership
+    const sourceAccountDoc = await accountModel.findById(sourceAccountId).populate("user", "name email systemUser");
+    if (!sourceAccountDoc) {
+        return res.status(404).json({
+            status: "error",
+            message: "Source account not found"
+        });
+    }
+
+    if (sourceAccountDoc.status !== "ACTIVE") {
+        return res.status(400).json({
+            status: "error",
+            message: `Source account is ${sourceAccountDoc.status}. Withdrawals can only be made from ACTIVE accounts`
+        });
+    }
+
+    // Customer IDOR check: customer must own the source account
+    const isOwner = sourceAccountDoc.user && sourceAccountDoc.user._id.toString() === req.user._id.toString();
+    if (!isOwner) {
+        return res.status(403).json({
+            status: "error",
+            message: "Forbidden: You can only withdraw cash from your own accounts"
+        });
+    }
+
+    if (sourceAccountDoc.user?.systemUser === true) {
+        return res.status(400).json({
+            status: "error",
+            message: "Direct cash withdrawals cannot be made from institutional system accounts via customer API"
+        });
+    }
+
+    // 3. Check transfer limits (per-transaction)
+    const limitConfig = await transferLimitConfigModel.getConfig();
+    if (cleanAmount > limitConfig.perTransactionLimit) {
+        return res.status(400).json({
+            status: "error",
+            message: `Withdrawal amount ₹${cleanAmount} exceeds the maximum per-transaction limit of ₹${limitConfig.perTransactionLimit}`
+        });
+    }
+
+    // 4. Resolve System User and Cash Vault Account
+    const sysUser = await userModel.findOne({ systemUser: true });
+    if (!sysUser) {
+        return res.status(500).json({
+            status: "error",
+            message: "Institutional system user not configured"
+        });
+    }
+
+    // 5. Execute within MongoDB ACID Transaction with retry
+    const MAX_RETRIES = 5;
+    let completedTx = null;
+    let vaultAccountDoc = null;
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        let session;
+        try {
+            session = await mongoose.startSession();
+            session.startTransaction();
+
+            vaultAccountDoc = await getOrCreateCashVaultAccount(sysUser, session);
+
+            if (vaultAccountDoc._id.toString() === sourceAccountDoc._id.toString()) {
+                await session.abortTransaction();
+                return res.status(400).json({
+                    status: "error",
+                    message: "Source and destination accounts cannot be the same"
+                });
+            }
+
+            // Serialization write-lock on customer account
+            const lockedSourceAccount = await accountModel.findOneAndUpdate(
+                { _id: sourceAccountDoc._id },
+                { $inc: { __v: 1 } },
+                { session }
+            );
+
+            // In-session derived balance check
+            const derivedBalance = await lockedSourceAccount.getBalance(session);
+            if (derivedBalance < cleanAmount) {
+                await session.abortTransaction();
+                return res.status(400).json({
+                    status: "error",
+                    message: `Insufficient balance. Current balance is ${derivedBalance}.Requested amount is ${cleanAmount}`
+                });
+            }
+
+            // In-session dynamic daily limit verification
+            const startOfDay = new Date();
+            startOfDay.setHours(0, 0, 0, 0);
+            const endOfDay = new Date();
+            endOfDay.setHours(23, 59, 59, 999);
+
+            const todayCompletedTxs = await transactionModel.find({
+                fromAccount: sourceAccountDoc._id,
+                status: "COMPLETED",
+                createdAt: { $gte: startOfDay, $lte: endOfDay }
+            }, 'amount', { session });
+
+            const dailySpent = todayCompletedTxs.reduce((sum, tx) => sum + (tx.amount || 0), 0);
+            const dailyCount = todayCompletedTxs.length;
+
+            if (dailySpent + cleanAmount > limitConfig.dailyAmountLimit) {
+                await session.abortTransaction();
+                return res.status(400).json({
+                    status: "error",
+                    message: `Daily transfer limit exceeded. Current daily spent: ₹${dailySpent}, requested: ₹${cleanAmount}, daily limit: ₹${limitConfig.dailyAmountLimit}, remaining allowance: ₹${Math.max(0, limitConfig.dailyAmountLimit - dailySpent)}`
+                });
+            }
+
+            if (dailyCount + 1 > limitConfig.dailyCountLimit) {
+                await session.abortTransaction();
+                return res.status(400).json({
+                    status: "error",
+                    message: `Daily transaction count limit of ${limitConfig.dailyCountLimit} exceeded. Completed today: ${dailyCount}`
+                });
+            }
+
+            // Create Transaction record
+            const txArray = await transactionModel.create([
+                {
+                    fromAccount: sourceAccountDoc._id,
+                    toAccount: vaultAccountDoc._id,
+                    amount: cleanAmount,
+                    idempotencyKey,
+                    status: "PENDING"
+                }
+            ], { session });
+            const tx = txArray[0];
+
+            // Create balancing double-entry ledger entries
+            await ladgerModel.create([{
+                account: sourceAccountDoc._id,
+                amount: cleanAmount,
+                transaction: tx._id,
+                type: "DEBIT"
+            }], { session });
+
+            await ladgerModel.create([{
+                account: vaultAccountDoc._id,
+                amount: cleanAmount,
+                transaction: tx._id,
+                type: "CREDIT"
+            }], { session });
+
+            // Mark transaction as COMPLETED
+            await transactionModel.findByIdAndUpdate(
+                tx._id,
+                { status: "COMPLETED" },
+                { session }
+            );
+
+            await session.commitTransaction();
+            completedTx = tx;
+            break;
+        } catch (err) {
+            if (session && session.inTransaction && session.inTransaction()) {
+                try { await session.abortTransaction(); } catch (e) {}
+            }
+            if (session) {
+                try { await session.endSession(); } catch (e) {}
+            }
+
+            const isTransient = (err.hasErrorLabel && (err.hasErrorLabel("TransientTransactionError") || err.hasErrorLabel("UnknownTransactionCommitResult"))) ||
+                err.code === 112 ||
+                err.codeName === "WriteConflict" ||
+                (err.message && /write conflict/i.test(err.message));
+
+            if (isTransient && attempt < MAX_RETRIES - 1) {
+                await new Promise(r => setTimeout(r, 20 * Math.pow(2, attempt) + Math.floor(Math.random() * 30)));
+                continue;
+            }
+
+            if (err.code === 11000) {
+                const racedTx = await transactionModel.findOne({ idempotencyKey });
+                if (racedTx && racedTx.status === "COMPLETED") {
+                    return res.status(200).json({
+                        success: true,
+                        status: "success",
+                        message: "Transaction with this idempotency key already exists and is completed",
+                        transaction: racedTx
+                    });
+                }
+            }
+
+            return next(err);
+        } finally {
+            if (session) {
+                try { await session.endSession(); } catch (e) {}
+            }
+        }
+    }
+
+    if (!completedTx) {
+        return res.status(500).json({
+            status: "error",
+            message: "Withdrawal failed due to concurrent transaction conflict. Please retry."
+        });
+    }
+
+    // 6. Audit & Notification
+    try {
+        await logAuditEvent({
+            actor: req.user._id,
+            action: "CASH_WITHDRAWAL",
+            resourceType: "TRANSACTION",
+            resourceId: completedTx._id,
+            reason: `Cash withdrawal of ₹${cleanAmount} from account ${sourceAccountDoc.accountHolderName || sourceAccountId}`,
+            metadata: {
+                amount: cleanAmount,
+                sourceAccount: sourceAccountId,
+                vaultAccount: vaultAccountDoc._id,
+                transactionId: completedTx._id
+            },
+            req
+        });
+    } catch (auditErr) {
+        console.error("Failed to log withdrawal audit:", auditErr.message);
+    }
+
+    try {
+        await notificationService.createNotification({
+            recipient: sourceAccountDoc.user._id || sourceAccountDoc.user,
+            type: "TRANSACTION_SENT",
+            title: "Cash Withdrawal Successful",
+            message: `₹${cleanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })} has been withdrawn from your account ${sourceAccountId}.`,
+            severity: "INFO",
+            relatedResourceType: "TRANSACTION",
+            relatedResourceId: completedTx._id,
+            metadata: {
+                amount: cleanAmount,
+                account: sourceAccountId,
+                transactionId: completedTx._id
+            }
+        });
+    } catch (notifErr) {
+        console.error("Failed to emit withdrawal notification:", notifErr.message);
+    }
+
+    return res.status(201).json({
+        success: true,
+        status: "success",
+        message: `Cash withdrawal of ₹${cleanAmount.toLocaleString('en-IN', { minimumFractionDigits: 2 })} completed successfully`,
+        transaction: completedTx
+    });
+}
+
 module.exports = {
     createTransaction,
     createinitializeFundsTransaction,
     getTransactions,
     getTransactionSummary,
     reverseTransactionController,
-    getSystemTransactionsController
+    getSystemTransactionsController,
+    depositCashController,
+    withdrawCashController
 };

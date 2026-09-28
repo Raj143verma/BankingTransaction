@@ -35,6 +35,8 @@ const auditLogSchema = new mongoose.Schema(
         'TRANSFER_LIMIT_EXCEEDED',
         'TRANSFER_BLOCKED',
         'TRANSFER_LIMIT_CONFIG_CHANGED',
+        'CASH_DEPOSIT',
+        'CASH_WITHDRAWAL',
       ],
       index: true,
     },

@@ -385,9 +385,16 @@ export function Transactions() {
 
   return (
     <div className="page-container">
-      <div className="page-header">
-        <h1>Transfer Funds</h1>
-        <p>Transfer funds securely between accounts with atomic double-entry ledger execution.</p>
+      <div className="page-header page-header-row">
+        <div>
+          <h1>Transfer Funds</h1>
+          <p>Transfer funds securely between accounts with atomic double-entry ledger execution.</p>
+        </div>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <Link to="/accounts" className="btn btn-secondary" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+            💵 Deposit / 🏧 Withdraw Cash
+          </Link>
+        </div>
       </div>
 
       {apiError && (

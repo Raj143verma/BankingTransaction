@@ -39,6 +39,24 @@ export const transactionService = {
   },
 
   /**
+   * Deposit cash directly into customer account
+   * POST /api/transactions/deposit
+   */
+  async depositCash(depositData) {
+    const response = await api.post('/transactions/deposit', depositData);
+    return response.data;
+  },
+
+  /**
+   * Withdraw cash directly from customer account
+   * POST /api/transactions/withdraw
+   */
+  async withdrawCash(withdrawData) {
+    const response = await api.post('/transactions/withdraw', withdrawData);
+    return response.data;
+  },
+
+  /**
    * Get all transactions across the bank with filters and pagination (System User only)
    * GET /api/transactions/system/all
    */
